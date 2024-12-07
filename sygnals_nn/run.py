@@ -9,7 +9,7 @@ def run_inference(model_file, input_file, output_file):
     model = tf.keras.models.load_model(model_file)
 
     # Load the input data
-    X_input, _ = load_data(input_file)
+    X_input, _ = load_data(input_file, inference=True)
 
     # Perform inference
     predictions = model.predict(X_input)
