@@ -29,18 +29,21 @@ def create(layers, activation, loss, optimizer, output):
 @click.option('--epochs', type=int, default=100, help="Number of epochs.")
 @click.option('--batch-size', type=int, default=32, help="Batch size.")
 @click.option('--learning-rate', type=float, default=0.01, help="Learning rate.")
-def train(model, data, epochs, batch_size, learning_rate):
+@click.option('--inputs', type=int, required=True, help="Number of input features.")
+@click.option('--outputs', type=int, required=True, help="Number of output features.")
+def train(model, data, epochs, batch_size, learning_rate, inputs, outputs):
     """Train a neural network."""
     print(f"DEBUG: model = {model}")
-    train_model(model, data, epochs, batch_size, learning_rate)
+    train_model(model, data, epochs, batch_size, learning_rate, inputs, outputs)
 
 @cli.command()
 @click.option('--model', type=str, required=True, help="Path to the model file.")
 @click.option('--input', type=str, required=True, help="Input data file (CSV, JSON, or raw text).")
 @click.option('--output', type=str, default=None, help="Output file to save predictions.")
-def run(model, input, output):
+@click.option('--inputs', type=int, required=True, help="Number of input features.")
+def run(model, input, output, inputs):
     """Run inference using a trained neural network."""
-    run_inference(model, input, output)
+    run_inference(model, input, output, inputs)
 
 @cli.command()
 @click.option('--predictions', type=str, required=True, help="File containing predictions.")

@@ -1,15 +1,17 @@
 import tensorflow as tf
 from sygnals_nn.utils import load_data
 
-def train_model(model_file, data_file, epochs, batch_size, learning_rate):
+def train_model(model_file, data_file, epochs, batch_size, learning_rate, inputs, outputs):
     """
     Train a neural network using the specified dataset.
     """
     # Step 1: Load the model from file
     model = tf.keras.models.load_model(model_file)  # Load the full model (architecture + weights + optimizer)
 
+    model.summary()
+
     # Step 2: Load the training data
-    X_train, Y_train = load_data(data_file)
+    X_train, Y_train = load_data(data_file, inputs, outputs)
 
     # Step 3: Recompile the model with the specified learning rate (if needed)
     model.compile(

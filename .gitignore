@@ -12,6 +12,7 @@ temp/
 outputs/
 tests/artifacts
 experiments/
+models/
 
 # Distribution / packaging
 .Python
