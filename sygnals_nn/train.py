@@ -1,9 +1,12 @@
+# sygnals_nn/train.py
+# -*- coding: utf-8 -*-
 import tensorflow as tf
 import os
 import logging
 from sygnals_nn.utils import load_data
 # Import ONNX conversion function if exporting after training
 from sygnals_nn.convert import convert_to_onnx
+import numpy as np # Import numpy
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -50,14 +53,18 @@ def train_model(
     # --- Step 1: Load the Keras Model ---
     try:
         logging.info("Loading Keras model...")
-        model = tf.keras.models.load_model(model_path)
+        # Load model without compiling initially to inspect optimizer later if needed
+        model = tf.keras.models.load_model(model_path, compile=False)
         logging.info("Model loaded successfully.")
-        model.summary(print_fn=logging.info)
+        # We'll compile later after potentially modifying the optimizer
+        # model.summary(print_fn=logging.info) # Print summary after compilation
     except Exception as e:
         logging.error(f"Error loading Keras model from {model_path}: {e}")
         raise
 
     # --- Step 2: Load the Training Data ---
+    X_train = None # Initialize X_train to handle potential errors in load_data
+    Y_train = None # Initialize Y_train
     try:
         logging.info("Loading training data...")
         X_train, Y_train = load_data(
@@ -68,110 +75,183 @@ def train_model(
             json_label_key=json_label_key,
             is_inference=False # Explicitly False for training
         )
-        logging.info(f"Training data loaded. X_train shape: {X_train.shape}, Y_train shape: {Y_train.shape}")
+        logging.info(f"Training data loaded. X_train shape: {X_train.shape}, Y_train shape: {Y_train.shape if Y_train is not None else 'None'}")
 
         # Basic validation
-        if X_train.shape[0] != Y_train.shape[0]:
-             raise ValueError(f"Number of samples mismatch between features ({X_train.shape[0]}) and labels ({Y_train.shape[0]}).")
         if X_train.shape[0] == 0:
              raise ValueError("Loaded training data is empty.")
+        if Y_train is None:
+             raise ValueError("Labels (Y_train) could not be loaded for training.")
+        if Y_train is not None and X_train.shape[0] != Y_train.shape[0]:
+             raise ValueError(f"Number of samples mismatch between features ({X_train.shape[0]}) and labels ({Y_train.shape[0]}).")
+
+
+        # Ensure data types are float32 for training
+        if X_train.dtype != np.float32:
+            logging.warning(f"Converting X_train dtype from {X_train.dtype} to float32.")
+            X_train = X_train.astype(np.float32)
+        if Y_train is not None and Y_train.dtype != np.float32:
+            # Check if Y_train is already numeric before casting
+            if not np.issubdtype(Y_train.dtype, np.number):
+                 raise TypeError(f"Loaded labels (Y_train) have non-numeric dtype {Y_train.dtype} before casting.")
+            logging.warning(f"Converting Y_train dtype from {Y_train.dtype} to float32.")
+            Y_train = Y_train.astype(np.float32)
+
 
     except Exception as e:
         logging.error(f"Error loading training data from {data_path}: {e}")
         raise
 
-    # --- Step 3: Recompile the Model with Specified Learning Rate ---
-    # It's generally good practice to recompile to ensure the optimizer and
-    # learning rate from the command line are used, overriding any saved state.
+    # --- Step 3: Prepare Optimizer and Compile ---
     try:
-        logging.info(f"Recompiling model with optimizer: {model.optimizer.name}, loss: {model.loss}, learning_rate: {learning_rate}")
-        # Get the existing optimizer config and update the learning rate
-        optimizer_config = model.optimizer.get_config()
-        optimizer_config['learning_rate'] = learning_rate
-        new_optimizer = model.optimizer.__class__.from_config(optimizer_config)
+        # Get the loss and metrics from the loaded model config if available
+        # Default loss/metrics if not found in config (should generally be there)
+        try:
+            config = model.get_config()
+            # Loss might be stored directly or under 'compile_config'
+            loss_func = config.get('loss') or model.loss or 'binary_crossentropy'
+            metrics_list = config.get('metrics') or ['accuracy']
+            # If metrics are stored under compile_config
+            if not metrics_list and 'compile_config' in config and config['compile_config']:
+                 metrics_list = config['compile_config'].get('metrics', ['accuracy'])
+            if not loss_func and 'compile_config' in config and config['compile_config']:
+                 loss_func = config['compile_config'].get('loss', 'binary_crossentropy')
 
-        # Recompile with the new optimizer instance and existing loss/metrics
+        except Exception as config_e:
+            logging.warning(f"Could not get loss/metrics from model config ({config_e}). Using defaults.")
+            loss_func = 'binary_crossentropy'
+            metrics_list = ['accuracy']
+
+        # Create a new optimizer instance with the specified learning rate
+        # Note: This approach creates a new optimizer state. If resuming training
+        # with the exact previous optimizer state is crucial, loading the saved
+        # optimizer and modifying its learning rate is more complex but possible.
+        # Creating a new instance is simpler and often sufficient.
+        # This might trigger a Keras warning about skipping variable loading if
+        # the saved model had a different optimizer state.
+        optimizer_name = 'adam' # Default or get from config if needed
+        try:
+            # Try to get the optimizer name from the loaded model if available
+            if model.optimizer:
+                optimizer_name = model.optimizer.__class__.__name__.lower()
+            elif 'compile_config' in config and config['compile_config']:
+                 opt_config = config['compile_config'].get('optimizer', {})
+                 if isinstance(opt_config, dict):
+                      optimizer_name = opt_config.get('class_name', 'adam').lower()
+                 elif isinstance(opt_config, str):
+                      optimizer_name = opt_config.lower()
+
+            logging.info(f"Creating new '{optimizer_name}' optimizer instance with learning_rate={learning_rate}")
+            # Get the optimizer class and instantiate it
+            optimizer_cls = tf.keras.optimizers.get(optimizer_name) # Get class from registry
+            new_optimizer = optimizer_cls(learning_rate=learning_rate)
+
+        except Exception as opt_e:
+            logging.warning(f"Could not determine original optimizer type ({opt_e}). Using new Adam optimizer.")
+            new_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+        logging.info(f"Compiling model with optimizer='{new_optimizer.__class__.__name__}', loss='{loss_func}', learning_rate={learning_rate}, metrics={metrics_list}")
         model.compile(
             optimizer=new_optimizer,
-            loss=model.loss, # Use the loss function the model was originally compiled with
-            metrics=model.metrics_names[1:] # Keep existing metrics (excluding the loss itself)
+            loss=loss_func,
+            metrics=metrics_list
         )
-        logging.info("Model recompiled successfully.")
+        logging.info("Model compiled successfully.")
+        model.summary(print_fn=logging.info) # Print summary after compilation
+
     except Exception as e:
-        logging.error(f"Error recompiling model: {e}")
-        # Decide if you want to proceed with the old compilation or raise error
-        raise # Safer to raise error if recompilation fails
+        logging.error(f"Error preparing optimizer or compiling model: {e}", exc_info=True)
+        raise
 
 
     # --- Step 4: Train the Model ---
     try:
         logging.info("Starting model training...")
+        # Model should be built if loaded correctly, Functional API models are built on instantiation
+        # No explicit build step needed here typically
+
         history = model.fit(
             X_train,
             Y_train,
             epochs=epochs,
             batch_size=batch_size,
-            verbose=2 # Show progress per epoch
-            # Add validation_split or validation_data later if needed
-            # validation_split=0.2
+            verbose=2 # Print progress bar per epoch
         )
         logging.info("Model training completed.")
-        # Log final metrics
-        final_loss = history.history['loss'][-1]
-        final_metrics = {m: history.history[m][-1] for m in model.metrics_names[1:]} # Get last value for metrics
-        logging.info(f"Final training loss: {final_loss:.4f}")
-        for name, value in final_metrics.items():
-            logging.info(f"Final training {name}: {value:.4f}")
+
+        # Log final metrics robustly
+        final_loss = history.history.get('loss', [None])[-1]
+        final_accuracy = history.history.get('accuracy', [None])[-1] # Keras default metric name
+        final_acc_alt = history.history.get('acc', [None])[-1] # Older Keras name
+
+        if final_loss is not None:
+             logging.info(f"Final training loss: {final_loss:.4f}")
+        if final_accuracy is not None:
+            logging.info(f"Final training accuracy: {final_accuracy:.4f}")
+        elif final_acc_alt is not None:
+             logging.info(f"Final training accuracy: {final_acc_alt:.4f}")
+
 
     except Exception as e:
-        logging.error(f"Error during model training: {e}")
+        logging.error(f"Error during model training: {e}", exc_info=True)
         raise
 
     # --- Step 5: Save the Trained Keras Model ---
     try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        model.save(model_path) # Overwrite the original file with the trained version
+        output_dir = os.path.dirname(model_path)
+        if output_dir:
+             os.makedirs(output_dir, exist_ok=True)
+        model.save(model_path)
         logging.info(f"Trained Keras model saved successfully to {model_path}")
     except Exception as e:
         logging.error(f"Error saving trained Keras model to {model_path}: {e}")
-        # Decide if you want to raise error or just warn
         raise
 
     # --- Step 6: Optional ONNX Export ---
     if export_onnx_path:
         logging.info(f"Exporting trained model to ONNX format: {export_onnx_path}")
         try:
-            # Determine input signature from the model if not provided explicitly
-            # This is crucial for ONNX conversion.
-            # We infer it from the first layer's input specification.
+            # --- Determine Input Signature ---
+            # Model should be built now after training. Try inferring from model.inputs.
             input_signature = None
             try:
-                # tf.keras.layers.InputLayer is often the first layer implicitly
-                input_spec = model.inputs[0].spec
-                input_signature = [input_spec]
-                logging.info(f"Inferred input signature for ONNX export: {input_signature}")
+                # Use model.inputs which should be defined for Functional models
+                if hasattr(model, 'inputs') and model.inputs:
+                    input_signature = [tf.TensorSpec(shape=inp.shape, dtype=inp.dtype, name=inp.name.split(':')[0])
+                                       for inp in model.inputs]
+                    logging.info(f"Inferred input signatures for ONNX export from model.inputs: {input_signature}")
+                else:
+                     # Fallback for models where .inputs might not be standard
+                     raise ValueError("Could not access model.inputs")
+
             except Exception as sig_e:
-                logging.warning(f"Could not automatically infer input signature for ONNX export: {sig_e}. "
-                                "Conversion might fail or require manual --input-signature in 'convert' command.")
-                # Fallback: try using the shape of the training data batch
-                if X_train is not None:
-                    try:
-                         # Use None for batch size dimension
-                        inferred_shape = (None,) + X_train.shape[1:]
-                        input_signature = [tf.TensorSpec(shape=inferred_shape, dtype=tf.float32)]
-                        logging.info(f"Using input signature based on training data shape: {input_signature}")
-                    except Exception as shape_e:
-                         logging.warning(f"Could not infer signature from data shape: {shape_e}")
+                 logging.warning(f"Could not automatically infer input signature from model attributes ({sig_e}). "
+                                 "Attempting signature based on training data shape.")
+                 if X_train is not None:
+                     try:
+                         inferred_shape = (None,) + X_train.shape[1:]
+                         # Use the dtype from the model's input layer if possible
+                         input_dtype = tf.float32 # Default
+                         if hasattr(model, 'inputs') and model.inputs:
+                             input_dtype = model.inputs[0].dtype
+                         elif hasattr(model, 'input') and model.input: # Fallback
+                              input_dtype = model.input.dtype
 
+                         input_signature = [tf.TensorSpec(shape=inferred_shape, dtype=input_dtype)]
+                         logging.info(f"Using input signature based on training data shape: {input_signature}")
+                     except Exception as shape_e:
+                          logging.warning(f"Could not infer signature from data shape: {shape_e}")
 
-            convert_to_onnx(
-                keras_model_path=model_path, # Use the just-saved trained model
-                output_onnx_path=export_onnx_path,
-                input_signature_list=input_signature # Pass the inferred signature list
-            )
-            logging.info(f"Model successfully exported to ONNX: {export_onnx_path}")
+            if not input_signature:
+                 logging.error("Failed to determine input signature for ONNX export. Skipping conversion.")
+            else:
+                 # --- Call Conversion ---
+                 convert_to_onnx(
+                     keras_model_path=model_path, # Use the just-saved trained model
+                     output_onnx_path=export_onnx_path,
+                     input_signature_list=input_signature # Pass the inferred signature list
+                 )
+                 logging.info(f"Model successfully exported to ONNX: {export_onnx_path}")
         except Exception as e:
-            logging.error(f"Error exporting model to ONNX format: {e}")
             # Log error but don't stop the whole process if Keras saving succeeded
-            # Consider adding a flag to make ONNX export failure critical if needed
+            logging.error(f"Error exporting model to ONNX format: {e}", exc_info=True)

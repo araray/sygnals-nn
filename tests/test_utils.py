@@ -8,6 +8,11 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sygnals_nn.utils import load_data, _parse_col_indices_or_names # Import helper for direct testing
+import logging # Import logging
+
+# Ensure logs are captured during testing
+logging.basicConfig(level=logging.INFO)
+
 
 # --- Fixture for creating temporary files ---
 @pytest.fixture
@@ -105,6 +110,7 @@ def test_parse_cols_mixed():
 
 def test_parse_cols_invalid_index():
     df_cols = pd.Index(['A', 'B'])
+    # This assertion should now pass with the updated _parse_col_indices_or_names logic
     with pytest.raises(ValueError, match="Column index 2 is out of bounds"):
         _parse_col_indices_or_names(df_cols, "0,2")
 
@@ -143,7 +149,7 @@ def test_load_data_csv_header_indices(temp_files):
 def test_load_data_csv_no_header_indices(temp_files):
     """Load CSV without header using column indices."""
     X, Y = load_data(temp_files["csv_no_header"], input_cols_str='0,1', label_cols_str='2')
-    assert X.shape == (3, 2)
+    assert X.shape == (3, 2) # Check shape is correct now
     assert Y.shape == (3, 1)
     np.testing.assert_array_almost_equal(X, [[1.1, 1.2], [1.3, 1.4], [1.5, 1.6]])
     np.testing.assert_array_almost_equal(Y.flatten(), [0, 1, 0])
@@ -254,7 +260,8 @@ def test_load_data_missing_label_cols_for_train():
 
 def test_load_data_bad_label_type(temp_files):
     """Test error when label column contains non-numeric data."""
-    with pytest.raises(ValueError, match="Label columns contain non-numeric values"):
+    # FIX: Update regex to match the error raised by astype(float) failure
+    with pytest.raises(ValueError, match="Label columns .* contain values that cannot be converted to numeric"):
         load_data(temp_files["csv_bad_label"], input_cols_str='f1,f2', label_cols_str='label')
 
 def test_load_data_bad_feature_type(temp_files):

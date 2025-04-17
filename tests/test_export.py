@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import json
 from sygnals_nn.export import export_results
+import numpy as np # Import numpy for comparison
 
 # Fixture to create a dummy predictions file
 @pytest.fixture
@@ -10,11 +11,11 @@ def predictions_file(tmp_path):
     """Creates a dummy CSV predictions file."""
     pred_path = tmp_path / "predictions_input.csv"
     # Simulate multi-column output (e.g., probabilities for multi-class)
-    pd.DataFrame({
-        'p0': [0.8, 0.1, 0.6],
-        'p1': [0.1, 0.7, 0.3],
-        'p2': [0.1, 0.2, 0.1]
-    }).to_csv(pred_path, index=False, header=False)
+    pd.DataFrame([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.7, 0.2],
+        [0.6, 0.3, 0.1]
+    ]).to_csv(pred_path, index=False, header=False)
     return pred_path
 
 # Fixture for output file path
@@ -51,31 +52,24 @@ def test_export_results_csv_to_json(predictions_file, output_file):
 
     assert isinstance(json_data, list)
     assert len(json_data) == len(expected_data)
-    # JSON export might store as dicts {col_idx: value} or just lists
-    # tf2onnx default is 'records' which is list of dicts if columns exist,
-    # but here we read with header=None, so it becomes list of lists.
-    # Let's check the values row by row
+    # Check the values row by row, allowing for float precision
     for i in range(len(expected_data)):
-         # Handle potential type differences (e.g., int vs float) if necessary
-         assert json_data[i] == expected_data[i]
+         # Compare elements within each sublist, allowing for tolerance
+         np.testing.assert_allclose(json_data[i], expected_data[i], rtol=1e-6)
 
 
 def test_export_results_csv_to_raw(predictions_file, output_file):
-    """Test exporting predictions from CSV to raw text format."""
-    output_raw = str(output_file) + ".txt" # Assume raw saves as .txt
+    """Test exporting predictions from CSV to raw text format (plain CSV)."""
+    output_raw = str(output_file) + ".txt" # Keep .txt extension for clarity if desired
     export_results(str(predictions_file), "raw", output_raw)
     assert os.path.exists(output_raw)
 
-    # Read back raw text and check content
-    with open(output_raw, 'r') as f:
-        lines = f.readlines()
-
+    # Read back the 'raw' output file (which is now CSV) and compare
     df_in = pd.read_csv(predictions_file, header=None)
-    assert len(lines) == df_in.shape[0] # Check number of lines
-    # Check first line content (adjust based on pandas to_string format)
-    expected_first_line = ",".join(map(str, df_in.iloc[0].values)) + "\n" # Simple expectation
-    # Pandas to_string might have different spacing, more robust check needed if format is strict
-    assert lines[0].strip().replace(" ", "") == expected_first_line.strip().replace(" ", "")
+    df_out = pd.read_csv(output_raw, header=None) # Read the output as CSV
+
+    # Compare DataFrames directly
+    pd.testing.assert_frame_equal(df_in, df_out)
 
 
 # --- Test Error Handling ---

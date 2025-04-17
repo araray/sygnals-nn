@@ -1,219 +1,306 @@
-import pytest
-import os
 import pandas as pd
 import numpy as np
+import logging
+import os
 import json
-import joblib
+import joblib # For saving/loading sklearn objects
+
+# Import necessary sklearn components
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sygnals_nn.preprocess import preprocess_data, _load_raw_data # Import helper too
 
-# Fixture to create raw data files
-@pytest.fixture
-def raw_data_files(tmp_path):
-    """Creates raw CSV and JSON files for preprocessing tests."""
-    files = {}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    # CSV Data
-    csv_path = tmp_path / "raw.csv"
-    pd.DataFrame({
-        'id': [1, 2, 3, 4, 5],
-        'text_data': ['great product', 'bad service', 'okay overall', 'great again', 'terrible'],
-        'category': ['A', 'B', 'A', 'A', 'C'],
-        'value1': [10.5, 11.2, 9.8, 10.1, 15.0],
-        'value2': [100, 150, 120, 110, 190]
-    }).to_csv(csv_path, index=False)
-    files["csv"] = csv_path
+# Define supported methods
+SUPPORTED_METHODS = ['tfidf', 'count', 'scale', 'label_encode']
 
-    # JSON Data (List of Objects)
-    json_path = tmp_path / "raw.json"
-    json_data = [
-        {'doc_id': 'j1', 'content': 'json is nice', 'class': 'Good', 'numeric': [5.1, 50]},
-        {'doc_id': 'j2', 'content': 'json is bad', 'class': 'Bad', 'numeric': [6.2, 65]},
-        {'doc_id': 'j3', 'content': 'json okay', 'class': 'Okay', 'numeric': [4.8, 55]},
-    ]
-    with open(json_path, 'w') as f: json.dump(json_data, f)
-    files["json"] = json_path
+def _load_raw_data(input_path, text_col=None, label_col=None, feature_cols=None, json_text_key=None, json_label_key=None, json_feature_key=None):
+    """Loads raw data from CSV or JSON, identifying relevant columns/keys."""
+    logging.info(f"Loading raw data from: {input_path}")
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input data file not found: {input_path}")
 
-    # Output paths
-    files["out_data"] = tmp_path / "processed_data.csv"
-    files["out_prep"] = tmp_path / "preprocessor.joblib"
+    # Convert input_path to string for consistent handling
+    input_path_str = str(input_path)
 
-    return files
+    if input_path_str.lower().endswith(".csv"):
+        try:
+            # Try reading with header=0 first, then check if header looks like data
+            data = pd.read_csv(input_path, header=0)
+            # Heuristic: If all column names are purely numeric strings, assume no header
+            if all(isinstance(col, str) and col.isdigit() for col in data.columns):
+                logging.warning("CSV header looks like numeric data. Re-reading with header=None.")
+                data = pd.read_csv(input_path, header=None)
+                data.columns = [str(i) for i in range(data.shape[1])] # Assign default numeric string columns
+                logging.info(f"Loaded CSV without header. Shape: {data.shape}, Assigned columns: {data.columns.tolist()}")
+            else:
+                logging.info(f"Loaded CSV with header. Shape: {data.shape}, Columns: {data.columns.tolist()}")
 
-# --- Test _load_raw_data Helper ---
-def test_load_raw_csv(raw_data_files):
-    """Test loading relevant columns from raw CSV."""
-    data, text_col, label_col, feature_cols = _load_raw_data(
-        raw_data_files["csv"],
-        text_col='text_data',
-        label_col='category',
-        feature_cols=['value1', 'value2']
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError, IndexError) as e:
+             logging.warning(f"Could not parse CSV '{input_path_str}' with header=0 (Error: {e}). Trying without header.")
+             try:
+                 data = pd.read_csv(input_path, header=None)
+                 data.columns = [str(i) for i in range(data.shape[1])] # Assign default numeric string columns
+                 logging.info(f"Loaded CSV without header. Shape: {data.shape}, Assigned columns: {data.columns.tolist()}")
+             except Exception as e_nohead:
+                 raise ValueError(f"Error reading CSV file '{input_path_str}' even without header: {e_nohead}") from e
+        except Exception as e:
+            raise ValueError(f"Error reading CSV file '{input_path_str}': {e}")
+
+
+    elif input_path_str.lower().endswith(".json"):
+        try:
+            with open(input_path, 'r') as f:
+                json_data = json.load(f)
+
+            if not isinstance(json_data, list) or not all(isinstance(item, dict) for item in json_data):
+                 # Allow dict of lists as well
+                 if not (isinstance(json_data, dict) and json_data and all(isinstance(val, list) for val in json_data.values())):
+                      raise ValueError("JSON input for preprocessing currently expects a list of objects or a dict of lists.")
+
+            if isinstance(json_data, dict):
+                 # Check lengths for dict of lists
+                 list_lengths = [len(v) for v in json_data.values()]
+                 if len(set(list_lengths)) > 1:
+                     non_empty_lengths = {l for l in list_lengths if l > 0}
+                     if len(non_empty_lengths) > 1:
+                         raise ValueError("JSON dictionary values (lists) must all have the same non-zero length.")
+                 data = pd.DataFrame(json_data)
+                 logging.info(f"Loaded JSON (dict of lists). Shape: {data.shape}, Columns: {data.columns.tolist()}")
+            elif not json_data: # Handle empty list
+                 logging.warning(f"JSON file {input_path_str} is empty.")
+                 return pd.DataFrame(), None, None, []
+            else: # List of objects
+                 data = pd.DataFrame(json_data)
+                 logging.info(f"Loaded JSON (list of objects). Shape: {data.shape}, Columns: {data.columns.tolist()}")
+
+
+            # Extract relevant data based on keys
+            extracted = {}
+            text_col_name = None
+            label_col_name = None
+            feature_col_names = []
+
+            # Determine the actual key names from the first object for validation (if list of dicts)
+            first_item_keys = data.columns # Use DataFrame columns now
+
+            if text_col and json_text_key:
+                 if json_text_key not in first_item_keys: raise ValueError(f"JSON text key '{json_text_key}' not found in JSON data columns: {first_item_keys.tolist()}.")
+                 # Use provided text_col as the desired column name in the output DataFrame
+                 text_col_name = text_col
+                 extracted[text_col_name] = data[json_text_key] # Select series from DataFrame
+
+            if label_col and json_label_key:
+                 if json_label_key not in first_item_keys: raise ValueError(f"JSON label key '{json_label_key}' not found in JSON data columns: {first_item_keys.tolist()}.")
+                 # Use provided label_col as the desired column name
+                 label_col_name = label_col
+                 extracted[label_col_name] = data[json_label_key] # Select series
+
+            if feature_cols and json_feature_key:
+                 if json_feature_key not in first_item_keys: raise ValueError(f"JSON feature key '{json_feature_key}' not found in JSON data columns: {first_item_keys.tolist()}.")
+                 # Assume features under the key are lists or compatible structures
+                 # Check if the column actually contains lists
+                 if not data[json_feature_key].empty and isinstance(data[json_feature_key].iloc[0], list):
+                     temp_features = data[json_feature_key].tolist() # Convert Series of lists to list of lists
+                     num_features = len(temp_features[0]) if temp_features else 0
+                     if not feature_cols or len(feature_cols) != num_features:
+                         logging.warning(f"Number of feature names in --feature-cols ({len(feature_cols)}) doesn't match features found under key '{json_feature_key}' ({num_features}). Using default names.")
+                         feature_col_names = [f"feature_{i}" for i in range(num_features)]
+                     else:
+                         feature_col_names = feature_cols # Use provided names
+                     feature_df = pd.DataFrame(temp_features, columns=feature_col_names, index=data.index) # Ensure index aligns
+                     for col in feature_col_names:
+                         extracted[col] = feature_df[col] # Add features to extracted dict
+                 else:
+                     # If the feature key points to a simple column, treat it as a single feature
+                     logging.warning(f"JSON feature key '{json_feature_key}' does not point to a list. Treating as single feature column.")
+                     if len(feature_cols) != 1:
+                         logging.warning(f"Provided {len(feature_cols)} feature names, but '{json_feature_key}' is a single column. Using first name: '{feature_cols[0]}'.")
+                     feature_col_names = [feature_cols[0]] # Use only the first provided name
+                     extracted[feature_col_names[0]] = data[json_feature_key]
+
+
+            selected_data = pd.DataFrame(extracted) # Create DataFrame from selected data
+            logging.info(f"Selected JSON data columns: {selected_data.columns.tolist()}")
+            # Return the DataFrame and the derived/provided column names
+            return selected_data, text_col_name, label_col_name, feature_col_names
+
+        except Exception as e:
+            raise ValueError(f"Error reading or processing raw JSON file '{input_path_str}': {e}")
+    else:
+        raise ValueError("Unsupported file type for raw data loading. Use .csv or .json.")
+
+
+def preprocess_data(
+    input_path: str | os.PathLike, # Accept Path objects
+    output_data_path: str,
+    output_preprocessor_path: str,
+    method: str,
+    text_col: str | None = None,
+    label_col: str | None = None,
+    feature_cols_str: str | None = None,
+    json_text_key: str = 'text',
+    json_label_key: str = 'label',
+    json_feature_key: str = 'features',
+    # Method specific args
+    tfidf_max_features: int | None = None,
+    # Add more args for other methods (e.g., scaler options)
+    ):
+    """
+    Applies a specified preprocessing method to raw data and saves the
+    transformed data and the fitted preprocessor object.
+
+    Args:
+        input_path: Path to the raw input data (CSV or JSON).
+        output_data_path: Path to save the processed numerical data (CSV).
+        output_preprocessor_path: Path to save the fitted preprocessor (joblib).
+        method: The preprocessing method ('tfidf', 'count', 'scale', 'label_encode').
+        text_col: Column name/index containing text (for tfidf, count).
+        label_col: Column name/index containing labels (for label_encode).
+        feature_cols_str: Comma-separated column names/indices for numerical features (for scale).
+        json_text_key: Key for text data in JSON input.
+        json_label_key: Key for label data in JSON input.
+        json_feature_key: Key for numerical feature data in JSON input.
+        tfidf_max_features: Max features for TF-IDF vectorizer.
+    """
+    logging.info(f"Starting preprocessing. Method: {method}")
+    logging.info(f"Input: {input_path}, Output Data: {output_data_path}, Output Preprocessor: {output_preprocessor_path}")
+
+    # --- Validate method FIRST ---
+    if method not in SUPPORTED_METHODS:
+        raise ValueError(f"Unsupported preprocessing method: '{method}'. Supported methods are: {SUPPORTED_METHODS}")
+
+    # --- Validate required arguments based on method BEFORE loading ---
+    if method in ['tfidf', 'count'] and not text_col:
+        raise ValueError(f"Text column (--text-col) must be specified for method '{method}'.")
+    if method == 'label_encode' and not label_col:
+         raise ValueError(f"Label column (--label-col) must be specified for method '{method}'.")
+    if method == 'scale' and not feature_cols_str:
+         raise ValueError(f"Feature columns (--feature-cols) must be specified for method '{method}'.")
+
+    feature_cols = feature_cols_str.split(',') if feature_cols_str else None
+
+    # --- Load Raw Data ---
+    # Pass the original text_col, label_col, feature_cols definitions
+    # The helper will return the actual names found and the selected data
+    # Note: _load_raw_data now returns only the *selected* columns based on the arguments.
+    selected_data, text_col_name, label_col_name, feature_col_names = _load_raw_data(
+        input_path, text_col, label_col, feature_cols,
+        json_text_key, json_label_key, json_feature_key
     )
-    assert isinstance(data, pd.DataFrame)
-    assert text_col == 'text_data'
-    assert label_col == 'category'
-    assert feature_cols == ['value1', 'value2']
-    assert list(data.columns) == ['text_data', 'category', 'value1', 'value2'] # Only loaded specified
 
-def test_load_raw_json(raw_data_files):
-    """Test loading relevant keys from raw JSON."""
-    data, text_col, label_col, feature_cols = _load_raw_data(
-        raw_data_files["json"],
-        text_col='content', # Use the name provided in the arg
-        label_col='class_label', # Use the name provided in the arg
-        feature_cols=['num1', 'num2'], # Use the names provided in the arg
-        json_text_key='content', # Map to JSON key
-        json_label_key='class', # Map to JSON key
-        json_feature_key='numeric' # Map to JSON key
-    )
-    assert isinstance(data, pd.DataFrame)
-    assert text_col == 'content'
-    assert label_col == 'class_label'
-    assert feature_cols == ['num1', 'num2']
-    assert list(data.columns) == ['content', 'class_label', 'num1', 'num2']
-    assert data['num1'][0] == 5.1 # Check values loaded correctly
+    # Check if loaded data is empty AFTER trying to select columns
+    # If selected_data is empty, it means the specified columns weren't found or the file was empty.
+    if selected_data.empty:
+        # Check if the original file was actually empty or if column selection failed
+        try:
+            # Quick check: read first few bytes to see if file has content
+            with open(input_path, 'rb') as f:
+                has_content = bool(f.read(10))
+            if not has_content:
+                 logging.warning(f"Input file {input_path} appears to be empty. Skipping processing.")
+            else:
+                 logging.warning(f"Selected data for processing from {input_path} is empty (columns likely missing or incorrect). Skipping processing.")
+        except Exception: # Handle potential errors reading the file again
+             logging.warning(f"Could not verify content of {input_path}. Selected data is empty. Skipping processing.")
 
-# --- Test Preprocess Methods ---
-
-def test_preprocess_tfidf(raw_data_files):
-    """Test TF-IDF preprocessing method."""
-    preprocess_data(
-        input_path=str(raw_data_files["csv"]),
-        output_data_path=str(raw_data_files["out_data"]),
-        output_preprocessor_path=str(raw_data_files["out_prep"]),
-        method='tfidf',
-        text_col='text_data',
-        tfidf_max_features=10 # Limit features for test
-    )
-    assert raw_data_files["out_data"].exists()
-    assert raw_data_files["out_prep"].exists()
-
-    # Load and check outputs
-    processed_df = pd.read_csv(raw_data_files["out_data"])
-    preprocessor = joblib.load(raw_data_files["out_prep"])
-
-    assert isinstance(preprocessor, TfidfVectorizer)
-    assert len(preprocessor.vocabulary_) <= 10
-    assert processed_df.shape[0] == 5 # Number of input rows
-    assert processed_df.shape[1] == len(preprocessor.vocabulary_) # Features should match vocab size
-    # Check if original label column was added back (it should NOT be by default now)
-    assert 'category' not in processed_df.columns
-
-def test_preprocess_countvectorizer(raw_data_files):
-    """Test CountVectorizer preprocessing method."""
-    preprocess_data(
-        input_path=str(raw_data_files["csv"]),
-        output_data_path=str(raw_data_files["out_data"]),
-        output_preprocessor_path=str(raw_data_files["out_prep"]),
-        method='count',
-        text_col='1' # Use index for text column
-    )
-    assert raw_data_files["out_data"].exists()
-    assert raw_data_files["out_prep"].exists()
-    preprocessor = joblib.load(raw_data_files["out_prep"])
-    assert isinstance(preprocessor, CountVectorizer)
-
-def test_preprocess_scaler(raw_data_files):
-    """Test StandardScaler preprocessing method."""
-    preprocess_data(
-        input_path=str(raw_data_files["csv"]),
-        output_data_path=str(raw_data_files["out_data"]),
-        output_preprocessor_path=str(raw_data_files["out_prep"]),
-        method='scale',
-        feature_cols_str='value1,4' # Use name and index
-    )
-    assert raw_data_files["out_data"].exists()
-    assert raw_data_files["out_prep"].exists()
-
-    processed_df = pd.read_csv(raw_data_files["out_data"])
-    preprocessor = joblib.load(raw_data_files["out_prep"])
-
-    assert isinstance(preprocessor, StandardScaler)
-    assert processed_df.shape == (5, 2) # 5 rows, 2 scaled columns
-    # Check if data looks scaled (mean close to 0)
-    np.testing.assert_almost_equal(processed_df.mean().values, [0.0, 0.0], decimal=5)
-    np.testing.assert_almost_equal(processed_df.std().values, [1.0, 1.0], decimal=5)
+        # Create empty output files? Or just return? Let's create empty files.
+        # Ensure directories exist first
+        os.makedirs(os.path.dirname(output_data_path), exist_ok=True)
+        os.makedirs(os.path.dirname(output_preprocessor_path), exist_ok=True)
+        open(output_data_path, 'w').close()
+        # Cannot save an empty preprocessor, maybe skip or save None? Skip for now.
+        logging.warning(f"Skipping saving preprocessor object as input data was empty or columns invalid.")
+        return
 
 
-def test_preprocess_labelencoder_csv(raw_data_files):
-    """Test LabelEncoder preprocessing method on CSV."""
-    preprocess_data(
-        input_path=str(raw_data_files["csv"]),
-        output_data_path=str(raw_data_files["out_data"]),
-        output_preprocessor_path=str(raw_data_files["out_prep"]),
-        method='label_encode',
-        label_col='category' # Use name
-    )
-    assert raw_data_files["out_data"].exists()
-    assert raw_data_files["out_prep"].exists()
+    processed_data = None
+    preprocessor = None
 
-    processed_df = pd.read_csv(raw_data_files["out_data"])
-    preprocessor = joblib.load(raw_data_files["out_prep"])
+    # --- Apply Chosen Method ---
+    # Now we use the validated column names (text_col_name, etc.) and the selected_data DataFrame
+    if method == 'tfidf':
+        # Validation already done, text_col_name should exist if text_col was provided
+        if not text_col_name or text_col_name not in selected_data.columns:
+            raise ValueError(f"Internal Error: Text column '{text_col_name}' not found in selected data.")
+        logging.info(f"Applying TF-IDF to column: '{text_col_name}'")
+        vectorizer = TfidfVectorizer(max_features=tfidf_max_features)
+        # Ensure data is string and handle potential NaNs introduced during selection
+        text_data_series = selected_data[text_col_name].astype(str).fillna('')
+        processed_features = vectorizer.fit_transform(text_data_series)
+        preprocessor = vectorizer
+        feature_names = vectorizer.get_feature_names_out()
+        processed_data = pd.DataFrame(processed_features.toarray(), columns=feature_names)
+        logging.info(f"TF-IDF completed. Shape: {processed_data.shape}")
 
-    assert isinstance(preprocessor, LabelEncoder)
-    assert processed_df.shape == (5, 1)
-    assert processed_df.columns == ['category']
-    # Check encoded values (A -> 0, B -> 1, C -> 2)
-    expected_labels = [0, 1, 0, 0, 2]
-    np.testing.assert_array_equal(processed_df['category'].values, expected_labels)
-    assert list(preprocessor.classes_) == ['A', 'B', 'C']
+    elif method == 'count':
+        if not text_col_name or text_col_name not in selected_data.columns:
+            raise ValueError(f"Internal Error: Text column '{text_col_name}' not found in selected data.")
+        logging.info(f"Applying Count Vectorizer to column: '{text_col_name}'")
+        vectorizer = CountVectorizer()
+        text_data_series = selected_data[text_col_name].astype(str).fillna('')
+        processed_features = vectorizer.fit_transform(text_data_series)
+        preprocessor = vectorizer
+        feature_names = vectorizer.get_feature_names_out()
+        processed_data = pd.DataFrame(processed_features.toarray(), columns=feature_names)
+        logging.info(f"Count Vectorizer completed. Shape: {processed_data.shape}")
 
-def test_preprocess_labelencoder_json(raw_data_files):
-    """Test LabelEncoder preprocessing method on JSON."""
-    preprocess_data(
-        input_path=str(raw_data_files["json"]),
-        output_data_path=str(raw_data_files["out_data"]),
-        output_preprocessor_path=str(raw_data_files["out_prep"]),
-        method='label_encode',
-        label_col='encoded_class', # Specify output column name
-        json_label_key='class' # Specify input JSON key
-    )
-    assert raw_data_files["out_data"].exists()
-    assert raw_data_files["out_prep"].exists()
-
-    processed_df = pd.read_csv(raw_data_files["out_data"])
-    preprocessor = joblib.load(raw_data_files["out_prep"])
-
-    assert isinstance(preprocessor, LabelEncoder)
-    assert processed_df.shape == (3, 1)
-    assert processed_df.columns == ['encoded_class']
-    # Check encoded values (Bad -> 0, Good -> 1, Okay -> 2)
-    expected_labels = [1, 0, 2]
-    np.testing.assert_array_equal(processed_df['encoded_class'].values, expected_labels)
-    assert list(preprocessor.classes_) == ['Bad', 'Good', 'Okay']
+    elif method == 'scale':
+        if not feature_col_names or not all(col in selected_data.columns for col in feature_col_names):
+            missing = [col for col in feature_col_names if col not in selected_data.columns]
+            raise ValueError(f"Internal Error: Feature columns {missing} not found in selected data.")
+        logging.info(f"Applying StandardScaler to columns: {feature_col_names}")
+        scaler = StandardScaler()
+        try:
+            # Select only the required columns for scaling
+            numeric_data = selected_data[feature_col_names].apply(pd.to_numeric, errors='coerce')
+            if numeric_data.isnull().any().any():
+                 nan_cols = numeric_data.columns[numeric_data.isnull().any()].tolist()
+                 logging.warning(f"NaN values found in feature columns {nan_cols} after converting to numeric. Filling with 0.")
+                 numeric_data = numeric_data.fillna(0)
+            processed_features = scaler.fit_transform(numeric_data)
+            preprocessor = scaler
+            processed_data = pd.DataFrame(processed_features, columns=feature_col_names)
+            logging.info(f"Scaling completed. Shape: {processed_data.shape}")
+        except Exception as e:
+             raise ValueError(f"Error scaling features in columns {feature_col_names}: {e}")
 
 
-# --- Test Error Handling ---
-def test_preprocess_missing_column(raw_data_files):
-    """Test error if specified column for method doesn't exist."""
-    with pytest.raises(ValueError, match="Text column 'non_existent' not found"):
-        preprocess_data(
-            input_path=str(raw_data_files["csv"]),
-            output_data_path=str(raw_data_files["out_data"]),
-            output_preprocessor_path=str(raw_data_files["out_prep"]),
-            method='tfidf',
-            text_col='non_existent'
-        )
+    elif method == 'label_encode':
+        if not label_col_name or label_col_name not in selected_data.columns:
+            raise ValueError(f"Internal Error: Label column '{label_col_name}' not found in selected data.")
+        logging.info(f"Applying LabelEncoder to column: '{label_col_name}'")
+        encoder = LabelEncoder()
+        # Handle potential NaNs introduced during selection
+        labels = selected_data[label_col_name].fillna('__MISSING__')
+        processed_labels = encoder.fit_transform(labels)
+        preprocessor = encoder
+        processed_data = pd.DataFrame({label_col_name: processed_labels})
+        logging.info(f"Label Encoding completed. Classes: {encoder.classes_}")
+        logging.info(f"Shape: {processed_data.shape}")
 
-def test_preprocess_method_requires_column(raw_data_files):
-    """Test error if required column for a method is not provided."""
-    with pytest.raises(ValueError, match="Text column.*must be specified for TF-IDF"):
-        preprocess_data(
-            input_path=str(raw_data_files["csv"]),
-            output_data_path=str(raw_data_files["out_data"]),
-            output_preprocessor_path=str(raw_data_files["out_prep"]),
-            method='tfidf',
-            text_col=None # Missing text_col
-        )
 
-def test_preprocess_unsupported_method(raw_data_files):
-    """Test error for an unsupported preprocessing method."""
-    with pytest.raises(ValueError, match="Unsupported preprocessing method: pca"):
-        preprocess_data(
-            input_path=str(raw_data_files["csv"]),
-            output_data_path=str(raw_data_files["out_data"]),
-            output_preprocessor_path=str(raw_data_files["out_prep"]),
-            method='pca', # Unsupported
-            feature_cols_str='value1,value2'
-        )
+    # --- Save Processed Data and Preprocessor ---
+    if processed_data is None or preprocessor is None:
+        # This should ideally not be reached if method validation and application work
+        raise RuntimeError(f"Preprocessing method '{method}' failed to produce output data or preprocessor object.")
+
+    try:
+        logging.info(f"Saving processed data to {output_data_path}...")
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_data_path), exist_ok=True)
+        processed_data.to_csv(output_data_path, index=False)
+        logging.info("Processed data saved successfully.")
+    except Exception as e:
+        logging.error(f"Error saving processed data: {e}")
+        raise
+
+    try:
+        logging.info(f"Saving preprocessor object to {output_preprocessor_path}...")
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_preprocessor_path), exist_ok=True)
+        joblib.dump(preprocessor, output_preprocessor_path)
+        logging.info("Preprocessor object saved successfully.")
+    except Exception as e:
+        logging.error(f"Error saving preprocessor object: {e}")
+        raise

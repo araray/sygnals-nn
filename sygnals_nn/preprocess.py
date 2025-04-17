@@ -17,7 +17,10 @@ def _load_raw_data(input_path, text_col=None, label_col=None, feature_cols=None,
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input data file not found: {input_path}")
 
-    if input_path.lower().endswith(".csv"):
+    # Convert input_path to string for consistent handling
+    input_path_str = str(input_path)
+
+    if input_path_str.lower().endswith(".csv"):
         try:
             data = pd.read_csv(input_path) # Assume header exists for raw data
             logging.info(f"Loaded CSV. Columns: {data.columns.tolist()}")
@@ -26,42 +29,66 @@ def _load_raw_data(input_path, text_col=None, label_col=None, feature_cols=None,
             text_col_name = None
             label_col_name = None
             feature_col_names = []
+            selected_data = pd.DataFrame() # Initialize empty DataFrame
 
             if text_col:
                 try:
                     idx = int(text_col)
-                    text_col_name = data.columns[idx]
+                    if 0 <= idx < len(data.columns):
+                         text_col_name = data.columns[idx]
+                    else:
+                         raise ValueError(f"Text column index '{text_col}' out of bounds.")
                 except ValueError:
                     text_col_name = text_col
-                if text_col_name not in data.columns: raise ValueError(f"Text column '{text_col_name}' not found.")
+                if text_col_name not in data.columns: raise ValueError(f"Text column name '{text_col_name}' not found.")
                 cols_to_extract.append(text_col_name)
+                selected_data[text_col_name] = data[text_col_name]
 
             if label_col:
                 try:
                     idx = int(label_col)
-                    label_col_name = data.columns[idx]
+                    if 0 <= idx < len(data.columns):
+                         label_col_name = data.columns[idx]
+                    else:
+                         raise ValueError(f"Label column index '{label_col}' out of bounds.")
                 except ValueError:
                     label_col_name = label_col
-                if label_col_name not in data.columns: raise ValueError(f"Label column '{label_col_name}' not found.")
+                if label_col_name not in data.columns: raise ValueError(f"Label column name '{label_col_name}' not found.")
                 cols_to_extract.append(label_col_name)
+                selected_data[label_col_name] = data[label_col_name]
+
 
             if feature_cols:
+                current_feature_cols = [] # Store successfully identified feature columns
                 for col in feature_cols:
+                    col_name = None
                     try:
                         idx = int(col)
-                        feature_col_names.append(data.columns[idx])
+                        if 0 <= idx < len(data.columns):
+                             col_name = data.columns[idx]
+                        else:
+                             raise ValueError(f"Feature column index '{col}' out of bounds.")
                     except ValueError:
-                         if col not in data.columns: raise ValueError(f"Feature column '{col}' not found.")
-                         feature_col_names.append(col)
+                         if col in data.columns:
+                             col_name = col
+                         else:
+                             raise ValueError(f"Feature column name '{col}' not found.")
+                    if col_name:
+                        current_feature_cols.append(col_name)
+                        selected_data[col_name] = data[col_name] # Add to selected data
+
+                feature_col_names = current_feature_cols # Update the list of names
                 cols_to_extract.extend(feature_col_names)
 
-            # Return only necessary columns/series
-            return data, text_col_name, label_col_name, feature_col_names
+
+            # Return only necessary columns/series DataFrame and names
+            # If no columns specified for method, selected_data might be empty, but raw data isn't necessarily
+            return selected_data, text_col_name, label_col_name, feature_col_names
 
         except Exception as e:
-            raise ValueError(f"Error reading raw CSV file '{input_path}': {e}")
+            raise ValueError(f"Error reading raw CSV file '{input_path_str}': {e}")
 
-    elif input_path.lower().endswith(".json"):
+    elif input_path_str.lower().endswith(".json"):
         try:
             with open(input_path, 'r') as f:
                 json_data = json.load(f)
@@ -69,50 +96,60 @@ def _load_raw_data(input_path, text_col=None, label_col=None, feature_cols=None,
             if not isinstance(json_data, list) or not all(isinstance(item, dict) for item in json_data):
                  raise ValueError("JSON input for preprocessing currently expects a list of objects.")
 
+            if not json_data: # Handle empty list
+                 logging.warning(f"JSON file {input_path_str} is empty.")
+                 return pd.DataFrame(), None, None, []
+
+
             # Extract relevant data based on keys
             extracted = {}
+            text_col_name = None
+            label_col_name = None
+            feature_col_names = []
+
+            # Determine the actual key names from the first object for validation
+            first_item_keys = json_data[0].keys()
+
             if text_col and json_text_key:
-                 if json_text_key not in json_data[0]: raise ValueError(f"JSON text key '{json_text_key}' not found.")
-                 extracted[text_col] = [item.get(json_text_key, '') for item in json_data] # Use provided text_col as name
+                 if json_text_key not in first_item_keys: raise ValueError(f"JSON text key '{json_text_key}' not found in first JSON object.")
+                 # Use provided text_col as the desired column name in the output DataFrame
                  text_col_name = text_col
-            else: text_col_name = None
+                 extracted[text_col_name] = [item.get(json_text_key, '') for item in json_data]
 
             if label_col and json_label_key:
-                 if json_label_key not in json_data[0]: raise ValueError(f"JSON label key '{json_label_key}' not found.")
-                 extracted[label_col] = [item.get(json_label_key) for item in json_data]
+                 if json_label_key not in first_item_keys: raise ValueError(f"JSON label key '{json_label_key}' not found in first JSON object.")
+                 # Use provided label_col as the desired column name
                  label_col_name = label_col
-            else: label_col_name = None
+                 extracted[label_col_name] = [item.get(json_label_key) for item in json_data]
 
             if feature_cols and json_feature_key:
-                 if json_feature_key not in json_data[0]: raise ValueError(f"JSON feature key '{json_feature_key}' not found.")
+                 if json_feature_key not in first_item_keys: raise ValueError(f"JSON feature key '{json_feature_key}' not found in first JSON object.")
                  # Assume features under the key are lists or compatible structures
                  temp_features = [item.get(json_feature_key, []) for item in json_data]
-                 # Convert to DataFrame for consistency, assuming feature_cols are names for these
+                 # Convert to DataFrame for consistency, using feature_cols as names
                  num_features = len(temp_features[0]) if temp_features else 0
                  if not feature_cols or len(feature_cols) != num_features:
                      logging.warning(f"Number of feature names in --feature-cols ({len(feature_cols)}) doesn't match features found under key '{json_feature_key}' ({num_features}). Using default names.")
                      feature_col_names = [f"feature_{i}" for i in range(num_features)]
                  else:
-                     feature_col_names = feature_cols
+                     feature_col_names = feature_cols # Use provided names
                  feature_df = pd.DataFrame(temp_features, columns=feature_col_names)
                  for col in feature_col_names:
-                     extracted[col] = feature_df[col]
-
-            else: feature_col_names = []
-
+                     extracted[col] = feature_df[col] # Add features to extracted dict
 
             data = pd.DataFrame(extracted)
             logging.info(f"Loaded JSON. Extracted columns: {data.columns.tolist()}")
+            # Return the DataFrame and the derived/provided column names
             return data, text_col_name, label_col_name, feature_col_names
 
         except Exception as e:
-            raise ValueError(f"Error reading raw JSON file '{input_path}': {e}")
+            raise ValueError(f"Error reading raw JSON file '{input_path_str}': {e}")
     else:
         raise ValueError("Unsupported file type for raw data loading. Use .csv or .json.")
 
 
 def preprocess_data(
-    input_path: str,
+    input_path: str | os.PathLike, # Accept Path objects
     output_data_path: str,
     output_preprocessor_path: str,
     method: str,
@@ -146,36 +183,58 @@ def preprocess_data(
     logging.info(f"Starting preprocessing. Method: {method}")
     logging.info(f"Input: {input_path}, Output Data: {output_data_path}, Output Preprocessor: {output_preprocessor_path}")
 
+    # --- Validate required arguments based on method BEFORE loading ---
+    if method in ['tfidf', 'count'] and not text_col:
+        raise ValueError(f"Text column (--text-col) must be specified for method '{method}'.")
+    if method == 'label_encode' and not label_col:
+         raise ValueError(f"Label column (--label-col) must be specified for method '{method}'.")
+    if method == 'scale' and not feature_cols_str:
+         raise ValueError(f"Feature columns (--feature-cols) must be specified for method '{method}'.")
+
     feature_cols = feature_cols_str.split(',') if feature_cols_str else None
 
     # --- Load Raw Data ---
+    # Pass the original text_col, label_col, feature_cols definitions
+    # The helper will return the actual names found and the selected data
     raw_data, text_col_name, label_col_name, feature_col_names = _load_raw_data(
         input_path, text_col, label_col, feature_cols,
         json_text_key, json_label_key, json_feature_key
     )
 
+    # Check if loaded data is empty AFTER trying to select columns
+    if raw_data.empty:
+        logging.warning(f"Selected data for processing from {input_path} is empty. Skipping processing.")
+        # Create empty output files? Or just return? Let's create empty files.
+        # Ensure directories exist first
+        os.makedirs(os.path.dirname(output_data_path), exist_ok=True)
+        os.makedirs(os.path.dirname(output_preprocessor_path), exist_ok=True)
+        open(output_data_path, 'w').close()
+        # Cannot save an empty preprocessor, maybe skip or save None? Skip for now.
+        logging.warning(f"Skipping saving preprocessor object as input data was empty.")
+        return
+
+
     processed_data = None
     preprocessor = None
 
     # --- Apply Chosen Method ---
+    # Now we use the validated column names (text_col_name, etc.)
     if method == 'tfidf':
-        if not text_col_name: raise ValueError("Text column (--text-col) must be specified for TF-IDF.")
+        # Validation already done, text_col_name should exist if text_col was provided
+        if not text_col_name: raise ValueError("Internal Error: Text column name not found after loading.")
         logging.info(f"Applying TF-IDF to column: '{text_col_name}'")
         vectorizer = TfidfVectorizer(max_features=tfidf_max_features)
-        # Ensure text data is string and handle potential NaN/missing values
         text_data = raw_data[text_col_name].astype(str).fillna('')
         processed_features = vectorizer.fit_transform(text_data)
         preprocessor = vectorizer
-        # Convert to DataFrame for saving (might be large)
-        # Create meaningful column names
         feature_names = vectorizer.get_feature_names_out()
         processed_data = pd.DataFrame(processed_features.toarray(), columns=feature_names)
         logging.info(f"TF-IDF completed. Shape: {processed_data.shape}")
 
     elif method == 'count':
-        if not text_col_name: raise ValueError("Text column (--text-col) must be specified for Count Vectorizer.")
+        if not text_col_name: raise ValueError("Internal Error: Text column name not found after loading.")
         logging.info(f"Applying Count Vectorizer to column: '{text_col_name}'")
-        vectorizer = CountVectorizer() # Add options like max_features if needed
+        vectorizer = CountVectorizer()
         text_data = raw_data[text_col_name].astype(str).fillna('')
         processed_features = vectorizer.fit_transform(text_data)
         preprocessor = vectorizer
@@ -184,15 +243,15 @@ def preprocess_data(
         logging.info(f"Count Vectorizer completed. Shape: {processed_data.shape}")
 
     elif method == 'scale':
-        if not feature_col_names: raise ValueError("Feature columns (--feature-cols) must be specified for scaling.")
+        if not feature_col_names: raise ValueError("Internal Error: Feature column names not found after loading.")
         logging.info(f"Applying StandardScaler to columns: {feature_col_names}")
         scaler = StandardScaler()
-        # Ensure data is numeric, handle errors
         try:
             numeric_data = raw_data[feature_col_names].apply(pd.to_numeric, errors='coerce')
             if numeric_data.isnull().any().any():
-                 logging.warning(f"NaN values found in feature columns {feature_col_names} after converting to numeric. Filling with 0.")
-                 numeric_data = numeric_data.fillna(0) # Simple imputation, consider median/mean
+                 nan_cols = numeric_data.columns[numeric_data.isnull().any()].tolist()
+                 logging.warning(f"NaN values found in feature columns {nan_cols} after converting to numeric. Filling with 0.")
+                 numeric_data = numeric_data.fillna(0)
             processed_features = scaler.fit_transform(numeric_data)
             preprocessor = scaler
             processed_data = pd.DataFrame(processed_features, columns=feature_col_names)
@@ -202,32 +261,20 @@ def preprocess_data(
 
 
     elif method == 'label_encode':
-        if not label_col_name: raise ValueError("Label column (--label-col) must be specified for label encoding.")
+        if not label_col_name: raise ValueError("Internal Error: Label column name not found after loading.")
         logging.info(f"Applying LabelEncoder to column: '{label_col_name}'")
         encoder = LabelEncoder()
-        # Handle potential missing values before encoding if necessary
-        labels = raw_data[label_col_name].fillna('__MISSING__') # Replace NaN with a placeholder string
+        labels = raw_data[label_col_name].fillna('__MISSING__')
         processed_labels = encoder.fit_transform(labels)
         preprocessor = encoder
-        # Output is just the encoded label column
         processed_data = pd.DataFrame({label_col_name: processed_labels})
         logging.info(f"Label Encoding completed. Classes: {encoder.classes_}")
         logging.info(f"Shape: {processed_data.shape}")
 
 
     else:
+        # This case should not be reachable if validation is done above
         raise ValueError(f"Unsupported preprocessing method: {method}")
-
-
-    # --- Combine Processed Features with Unprocessed Columns (Optional) ---
-    # If only specific columns were processed, you might want to merge back
-    # other relevant columns (like IDs or unprocessed labels/features).
-    # This example focuses on saving the *processed* part.
-    # If vectorizing text, we might want to add the original label column back.
-    if method in ['tfidf', 'count'] and label_col_name in raw_data.columns:
-         logging.info(f"Adding original label column '{label_col_name}' to processed data.")
-         # Ensure indices align if data was filtered/shuffled (shouldn't be here)
-         processed_data[label_col_name] = raw_data[label_col_name].values
 
 
     # --- Save Processed Data and Preprocessor ---
@@ -237,7 +284,6 @@ def preprocess_data(
     try:
         logging.info(f"Saving processed data to {output_data_path}...")
         os.makedirs(os.path.dirname(output_data_path), exist_ok=True)
-        # Save processed data as CSV without index
         processed_data.to_csv(output_data_path, index=False)
         logging.info("Processed data saved successfully.")
     except Exception as e:

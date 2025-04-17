@@ -1,11 +1,19 @@
+# tests/test_train.py
+# -*- coding: utf-8 -*-
 import pytest
 import os
 import pandas as pd
 import numpy as np
 from sygnals_nn.train import train_model
 from sygnals_nn.create import create_network
-import tensorflow as tf
 import json
+import traceback # FIX: Added missing import
+
+# Force TensorFlow to use CPU only to avoid CUDA/CuDNN issues in test environments
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+# Import tensorflow after setting the environment variable
+import tensorflow as tf
+
 
 # Fixture to create necessary files for training tests
 @pytest.fixture
@@ -38,7 +46,15 @@ def train_setup(tmp_path):
     # --- Create Basic Keras Model (2 inputs, 1 output) ---
     keras_model_path = tmp_path / "train_model.keras"
     # Create the initial model structure, training will load and modify it
-    create_network("2,4,1", None, "relu,sigmoid", "binary_crossentropy", "adam", str(keras_model_path))
+    # Corrected call using keyword arguments
+    create_network(
+        layers_str="2,4,1",           # Input dim 2, hidden 4, output 1
+        output_path=str(keras_model_path),
+        layer_types_str=None,         # Default to dense
+        activations_str="relu,sigmoid", # Activation for hidden, output
+        loss="binary_crossentropy",
+        optimizer="adam"
+    )
     setup_files["keras_model"] = keras_model_path
 
     # --- Path for ONNX export ---
@@ -88,17 +104,23 @@ def test_train_model_json_success(train_setup):
     model_before = tf.keras.models.load_model(model_file)
     weights_before = [w.numpy() for w in model_before.weights]
 
-    train_model(
-        model_path=str(model_file),
-        data_path=str(data_file),
-        epochs=2,
-        batch_size=1,
-        learning_rate=0.01,
-        input_cols_str='features', # Key containing feature list
-        label_cols_str='label',    # Key containing label
-        json_input_key='features', # Specify JSON key for input
-        json_label_key='label'     # Specify JSON key for label
-    )
+    # Run the train function and capture potential exceptions for debugging
+    try:
+        train_model(
+            model_path=str(model_file),
+            data_path=str(data_file),
+            epochs=2,
+            batch_size=1,
+            learning_rate=0.01,
+            input_cols_str='features', # Key containing feature list
+            label_cols_str='label',    # Key containing label
+            json_input_key='features', # Specify JSON key for input
+            json_label_key='label'     # Specify JSON key for label
+        )
+    except Exception as e:
+        # FIX: Use imported traceback
+        pytest.fail(f"train_model raised an exception: {e}\n{traceback.format_exc()}")
+
 
     assert model_file.exists()
     model_after = tf.keras.models.load_model(model_file)
@@ -116,6 +138,9 @@ def test_train_model_json_success(train_setup):
 # --- Test Training with ONNX Export ---
 def test_train_model_with_onnx_export(train_setup):
     """Test training with the --export-onnx flag."""
+    # Skip if tf2onnx is not installed
+    pytest.importorskip("tf2onnx")
+
     model_file = train_setup["keras_model"]
     data_file = train_setup["csv_train"]
     onnx_file = train_setup["onnx_export"]
