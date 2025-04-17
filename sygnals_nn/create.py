@@ -1,4 +1,7 @@
 import tensorflow as tf
+import logging
+import os
+
 
 def create_network(layers, activation, loss, optimizer, output):
     """
