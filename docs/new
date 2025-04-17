@@ -1,0 +1,658 @@
+I understand the documents are still not displaying correctly. I apologize for this persistent issue.
+
+Since the formatted documents aren't working, I'll provide the plain text content for both `README.md` and the `usage.md` guide directly here in the chat.
+
+\--- START README.md CONTENT ---
+
+**Sygnals-NN**
+
+Sygnals-NN is a friendly command-line tool for creating, training, using, and managing neural networks. It’s designed for people with basic familiarity with data preparation and command-line interfaces, enabling experimentation with machine learning without extensive Python coding.
+
+Designed with flexibility in mind, it adheres to the Unix philosophy by enabling modular tasks like creating models, preprocessing data, training models, running inferences, converting formats, and exporting predictions.
+
+Whether you're working with data in CSV or JSON formats, Sygnals-NN empowers you to preprocess data and run machine learning experiments with ease.
+
+Features
+
+  * Model Creation: Define and save neural network architectures (Dense, CNNs like Conv1D/Conv2D) with customizable layers, activation functions, loss functions, and optimizers.
+  * Data Preprocessing: Built-in commands to preprocess raw data (CSV/JSON) using methods like TF-IDF, Count Vectorization, Scaling (StandardScaler), and Label Encoding. Saves processed data and reusable preprocessor objects.
+  * Training: Train Keras models on your dataset (CSV/JSON), adjusting parameters like epochs, batch size, and learning rate. Optionally export the trained model to ONNX format directly after training.
+  * Inference: Run predictions using pre-trained Keras or ONNX models on new datasets (CSV/JSON). Automatically applies saved preprocessors if provided.
+  * Model Conversion: Convert trained Keras models to the ONNX format for broader deployment options.
+  * Export: Save predictions to files in various formats like CSV or JSON.
+  * Input Formats: Supports CSV and JSON for datasets. Handles different JSON structures (list of objects, dictionary of lists).
+  * Output Formats: Saves models in .keras and .onnx formats. Saves predictions and processed data in CSV or JSON.
+
+-----
+
+Installation
+
+Prerequisites
+
+  * Python 3.10 or higher
+  * A terminal or command-line interface
+  * Virtual environment recommended for isolating dependencies
+
+Installation Steps
+
+1.  Clone the repository:
+    git clone [https://github.com/araray/sygnals-nn](https://www.google.com/search?q=https://github.com/araray/sygnals-nn) sygnals-nn
+    cd sygnals-nn
+
+2.  Install the required dependencies:
+    pip install -r requirements.txt
+
+    # Ensure you have tf2onnx and scikit-learn installed now
+
+3.  Install the package in editable mode:
+    pip install -e .
+
+4.  Verify installation:
+    sygnals-nn --help
+
+    You should see output similar to this:
+
+    Usage: sygnals-nn [OPTIONS] COMMAND [ARGS]...
+
+    Sygnals-NN: A CLI tool for creating, training, running, and managing
+    neural networks, with support for various data formats and preprocessing.
+
+    Options:
+    \--help  Show this message and exit.
+
+    Commands:
+    convert    Convert a trained Keras model to ONNX format.
+    create     Create and save a neural network architecture (Keras model).
+    export     Export predictions from a file to a specified format.
+    preprocess Preprocess raw data (CSV or JSON) using specified methods.
+    run        Run inference using a trained Keras or ONNX model.
+    train      Train a Keras model using the specified dataset.
+
+-----
+
+Workflow Example (with Preprocessing)
+
+Let's imagine we have raw text data for classification in `raw_reviews.csv` with columns `review_text` and `sentiment` (positive/negative).
+
+1.  Preprocess Text Data (TF-IDF):
+
+sygnals-nn preprocess  
+\--input-data raw\_reviews.csv  
+\--output-data processed\_features.csv  
+\--output-preprocessor tfidf\_vectorizer.joblib  
+\--method tfidf  
+\--text-col review\_text  
+\--tfidf-max-features 5000 \# Optional: limit features
+
+  * This reads `raw_reviews.csv`.
+  * Applies TF-IDF to the `review_text` column.
+  * Saves the numerical TF-IDF features to `processed_features.csv`.
+  * Saves the fitted `TfidfVectorizer` object to `tfidf_vectorizer.joblib`.
+  * Note: The original `sentiment` column might need separate encoding (see Step 1b).
+
+1b. Preprocess Labels (Label Encoding):
+
+sygnals-nn preprocess  
+\--input-data raw\_reviews.csv  
+\--output-data processed\_labels.csv  
+\--output-preprocessor label\_encoder.joblib  
+\--method label\_encode  
+\--label-col sentiment
+
+  * Reads `raw_reviews.csv`.
+  * Applies Label Encoding to the `sentiment` column (e.g., 'positive' -\> 1, 'negative' -\> 0).
+  * Saves the numerical labels to `processed_labels.csv`.
+  * Saves the fitted `LabelEncoder` object to `label_encoder.joblib`.
+
+Self-Correction: The current `preprocess` command saves only the processed column. You would need to manually combine `processed_features.csv` and `processed_labels.csv` into a single `training_data.csv` for the `train` command, ensuring rows align. Alternatively, the `preprocess.py` script could be enhanced to handle merging. For now, let's assume manual merging or modification. Let's create `training_data.csv` containing TF-IDF features and the encoded label.
+
+2.  Create a Model:
+
+sygnals-nn create  
+\--layers 5000,128,1  
+\--activation relu,sigmoid  
+\--loss binary\_crossentropy  
+\--optimizer adam  
+\--output sentiment\_model.keras
+
+  * Creates a Dense network suitable for the 5000 TF-IDF features.
+
+<!-- end list -->
+
+3.  Train the Model:
+
+# Assuming training\_data.csv has 5000 feature columns (0-4999) and 1 label column (5000)
+
+sygnals-nn train  
+\--model sentiment\_model.keras  
+\--data training\_data.csv  
+\--input-cols "0-4999" \# Specify feature columns (adjust if needed)
+\--label-cols "5000"    \# Specify label column (adjust if needed)
+\--epochs 50  
+\--batch-size 64  
+\--export-onnx sentiment\_model.onnx \# Optional: export to ONNX
+
+  * Trains the model using the preprocessed numerical data.
+  * Note: The `--input-cols` and `--label-cols` need to correctly point to the columns in the combined `training_data.csv`. Using ranges like "0-4999" might require implementation or using explicit comma-separated lists.
+
+<!-- end list -->
+
+4.  Prepare New Data for Inference:
+
+Assume new reviews are in `new_reviews.csv` (only `review_text` column).
+
+5.  Run Inference (using saved preprocessor):
+
+sygnals-nn run  
+\--model sentiment\_model.onnx \# Use Keras or ONNX model
+\--input-data new\_reviews.csv  
+\--output predictions.csv  
+\--input-cols "review\_text" \# Specify the *original* text column name
+\--preprocessor-path tfidf\_vectorizer.joblib \# Apply the saved TF-IDF vectorizer
+
+  * Loads the new reviews.
+  * Loads the saved `tfidf_vectorizer.joblib`.
+  * The `run` command uses the preprocessor on the `review_text` column before feeding data to the model.
+  * Saves predictions to `predictions.csv`.
+
+-----
+
+Detailed Command Usage
+
+(Add detailed explanations for `preprocess` and `convert` commands, similar to existing commands)
+
+`preprocess`
+
+Preprocesses raw data using various methods.
+
+sygnals-nn preprocess [OPTIONS]
+
+Options:
+
+  * `--input-data PATH`: Path to raw data (CSV/JSON). [required]
+  * `--output-data PATH`: Path to save processed numerical data (CSV). [required]
+  * `--output-preprocessor PATH`: Path to save the fitted preprocessor object. [required]
+  * `--method [tfidf|count|scale|label_encode]`: Preprocessing method. [required]
+  * `--text-col TEXT`: Column name/index for text data (for tfidf, count).
+  * `--label-col TEXT`: Column name/index for labels (for label\_encode).
+  * `--feature-cols TEXT`: Comma-separated columns for numerical features (for scale).
+  * `--json-text-key TEXT`: JSON key for text data. [default: text]
+  * `--json-label-key TEXT`: JSON key for label data. [default: label]
+  * `--json-feature-key TEXT`: JSON key for numerical features. [default: features]
+  * `--tfidf-max-features INTEGER`: Max features for TF-IDF.
+
+`convert`
+
+Converts a Keras model to ONNX format.
+
+sygnals-nn convert [OPTIONS]
+
+Options:
+
+  * `--keras-model PATH`: Path to the Keras model (.keras). [required]
+  * `--output-onnx PATH`: Path to save the ONNX model (.onnx). [required]
+  * `--input-signature TEXT`: Optional: Input signature string (e.g., `'[tf.TensorSpec(shape=(None, 784), dtype=tf.float32)]'`).
+
+(Update usage examples for `create`, `train`, `run` to show new options like JSON keys, preprocessor path, CNN layers etc.)
+
+-----
+
+\--- END README.md CONTENT ---
+
+\--- START usage.md CONTENT ---
+
+Sygnals-NN: Usage Guide and Examples
+
+This guide provides detailed examples of how to use the `sygnals-nn` command-line tool for various machine learning tasks, including data preprocessing, model creation (Dense and CNN), training, inference, and format conversion.
+
+Prerequisites: Ensure you have installed `sygnals-nn` and its dependencies, including `tensorflow`, `pandas`, `numpy`, `click`, `scikit-learn`, `joblib`, and `tf2onnx`.
+
+pip install -r requirements.txt
+pip install -e .
+
+-----
+
+1.  Basic Workflow: Dense Model with CSV Data
+
+This example demonstrates the simplest workflow: creating a dense neural network, training it on numerical CSV data, and running inference.
+
+Scenario: Predict a binary outcome (0 or 1) based on two numerical features.
+
+a. Prepare Data:
+
+Create `data_train.csv`:
+
+feature\_A,feature\_B,target\_label
+1.1,0.5,0
+2.3,0.6,1
+1.5,0.4,0
+3.1,0.7,1
+2.8,0.9,1
+
+Create `data_infer.csv` (no labels):
+
+feature\_A,feature\_B
+4.0,0.8
+0.5,0.2
+
+b. Create Model:
+
+Define a simple dense network with 2 input neurons, one hidden layer of 8 neurons (ReLU), and 1 output neuron (Sigmoid for binary classification).
+
+sygnals-nn create  
+\--layers 2,8,1  
+\--activation relu,sigmoid  
+\--loss binary\_crossentropy  
+\--optimizer adam  
+\--output simple\_dense\_model.keras
+
+  * `--layers 2,8,1`: Defines the layers: 2 inputs, 8 hidden, 1 output.
+  * `--activation relu,sigmoid`: ReLU for hidden, Sigmoid for output.
+  * `--loss binary_crossentropy`: Suitable for binary classification.
+  * `--optimizer adam`: A common and effective optimizer.
+  * `--output simple_dense_model.keras`: Saves the model architecture.
+
+c. Train Model:
+
+Train the created model using `data_train.csv`.
+
+sygnals-nn train  
+\--model simple\_dense\_model.keras  
+\--data data\_train.csv  
+\--input-cols "feature\_A,feature\_B"  
+\--label-cols "target\_label"  
+\--epochs 50  
+\--batch-size 2  
+\--learning-rate 0.005
+
+  * `--model`: Specifies the model file created earlier.
+  * `--data`: Specifies the training data file.
+  * `--input-cols`: Comma-separated list of input feature column names (or indices).
+  * `--label-cols`: The target label column name (or index).
+  * `--epochs 50`: Train for 50 passes over the data.
+  * `--batch-size 2`: Process 2 samples at a time.
+  * `--learning-rate 0.005`: Sets the optimizer's learning rate.
+
+d. Run Inference:
+
+Use the trained model to make predictions on `data_infer.csv`.
+
+sygnals-nn run  
+\--model simple\_dense\_model.keras  
+\--input-data data\_infer.csv  
+\--input-cols "0,1"  
+\--output predictions\_dense.csv
+
+  * `--model`: The trained model file.
+  * `--input-data`: The data file for inference.
+  * `--input-cols "0,1"`: Selects the first two columns (feature\_A, feature\_B) using indices.
+  * `--output`: Saves the predictions (probabilities in this case) to `predictions_dense.csv`.
+
+-----
+
+2.  Working with JSON Data
+
+`sygnals-nn` can load data directly from JSON files. It primarily supports JSON files structured as a list of objects.
+
+Scenario: Train a model using features and labels stored in a JSON file.
+
+a. Prepare Data:
+
+Create `data_train.json`:
+
+[
+{"id": "doc1", "vector": [0.1, 0.9, 0.2], "category": 0},
+{"id": "doc2", "vector": [0.8, 0.1, 0.3], "category": 1},
+{"id": "doc3", "vector": [0.2, 0.7, 0.3], "category": 0},
+{"id": "doc4", "vector": [0.7, 0.2, 0.4], "category": 1}
+]
+
+Create `data_infer.json`:
+
+[
+{"id": "doc5", "vector": [0.5, 0.5, 0.5]},
+{"id": "doc6", "vector": [0.9, 0.1, 0.9]}
+]
+
+b. Create Model:
+
+The input data has 3 features (`vector`).
+
+sygnals-nn create  
+\--layers 3,10,1  
+\--activation relu,sigmoid  
+\--loss binary\_crossentropy  
+\--optimizer adam  
+\--output json\_model.keras
+
+c. Train Model:
+
+Specify the keys containing the features and labels using `--json-input-key` and `--json-label-key`. Also provide `--input-cols` and `--label-cols` (even if they just repeat the key name, this tells `load_data` which keys to extract for X and Y).
+
+sygnals-nn train  
+\--model json\_model.keras  
+\--data data\_train.json  
+\--input-cols "vector"  
+\--label-cols "category"  
+\--json-input-key "vector"  
+\--json-label-key "category"  
+\--epochs 30
+
+d. Run Inference:
+
+sygnals-nn run  
+\--model json\_model.keras  
+\--input-data data\_infer.json  
+\--input-cols "vector"  
+\--json-input-key "vector"  
+\--output predictions\_json.csv
+
+-----
+
+3.  Data Preprocessing with `preprocess`
+
+The `preprocess` command allows you to transform raw data into numerical formats suitable for training, saving both the processed data and the reusable preprocessor object (e.g., vectorizer, scaler).
+
+Scenario: Process raw text reviews and numerical ratings for sentiment analysis.
+
+a. Prepare Data:
+
+Create `raw_reviews.csv`:
+
+ReviewID,ReviewText,Rating,Sentiment
+R1,"Loved the product, excellent quality\!",5,Positive
+R2,"Terrible service, very slow response.",1,Negative
+R3,"It was okay, nothing special.",3,Neutral
+R4,"Amazing\! Will buy again.",5,Positive
+R5,"Product broke after one week.",1,Negative
+
+b. Preprocess Text (TF-IDF):
+
+Convert `ReviewText` into TF-IDF features.
+
+sygnals-nn preprocess  
+\--input-data raw\_reviews.csv  
+\--output-data reviews\_tfidf.csv  
+\--output-preprocessor tfidf\_vec.joblib  
+\--method tfidf  
+\--text-col "ReviewText"  
+\--tfidf-max-features 100
+
+  * `--method tfidf`: Specifies TF-IDF vectorization.
+  * `--text-col "ReviewText"`: Identifies the column containing text.
+  * `--output-data reviews_tfidf.csv`: Saves the numerical TF-IDF matrix.
+  * `--output-preprocessor tfidf_vec.joblib`: Saves the fitted `TfidfVectorizer`.
+  * `--tfidf-max-features 100`: Limits the vocabulary size.
+
+c. Preprocess Labels (Label Encoding):
+
+Convert the `Sentiment` column (Positive/Negative/Neutral) into numerical labels (0, 1, 2).
+
+sygnals-nn preprocess  
+\--input-data raw\_reviews.csv  
+\--output-data reviews\_labels.csv  
+\--output-preprocessor label\_enc.joblib  
+\--method label\_encode  
+\--label-col "Sentiment"
+
+  * `--method label_encode`: Specifies label encoding.
+  * `--label-col "Sentiment"`: Identifies the column to encode.
+  * `--output-data reviews_labels.csv`: Saves the numerical labels.
+  * `--output-preprocessor label_enc.joblib`: Saves the fitted `LabelEncoder`.
+
+d. Preprocess Numerical Features (Scaling):
+
+Scale the `Rating` column using `StandardScaler`.
+
+sygnals-nn preprocess  
+\--input-data raw\_reviews.csv  
+\--output-data reviews\_scaled\_rating.csv  
+\--output-preprocessor scaler.joblib  
+\--method scale  
+\--feature-cols "Rating"
+
+  * `--method scale`: Specifies standard scaling.
+  * `--feature-cols "Rating"`: Identifies the numerical column(s) to scale.
+  * `--output-data reviews_scaled_rating.csv`: Saves the scaled ratings.
+  * `--output-preprocessor scaler.joblib`: Saves the fitted `StandardScaler`.
+
+e. Combine Processed Data (Manual Step):
+
+The `preprocess` command currently saves each processed part separately. You need to combine these into a single file for training. For example, using `pandas` in a separate Python script or manually:
+
+  * Load `reviews_tfidf.csv`.
+  * Load `reviews_scaled_rating.csv`.
+  * Load `reviews_labels.csv`.
+  * Concatenate them column-wise, ensuring rows align correctly.
+  * Save the combined data to `training_data_processed.csv`.
+
+(Note: Future versions of `sygnals-nn` might offer options to streamline this combination step within the `preprocess` command itself.)
+
+-----
+
+4.  Training and Inference with Preprocessors
+
+Once data is preprocessed and preprocessors are saved, you can train on the processed data and use the saved preprocessors during inference on raw data.
+
+Scenario: Train a model on the combined processed review data and run inference on new raw reviews.
+
+a. Combine Data (as described in 3.e):
+
+Assume you have created `training_data_processed.csv` containing the TF-IDF features, the scaled rating, and the encoded sentiment label. Let's say it has 100 TF-IDF columns (0-99), 1 scaled rating column (100), and 1 label column (101).
+
+b. Create Model:
+
+The input dimension is now 100 (TF-IDF) + 1 (Scaled Rating) = 101. The output needs 3 neurons for 3 sentiment classes (Positive/Negative/Neutral), using Softmax.
+
+sygnals-nn create  
+\--layers 101,64,3  
+\--activation relu,softmax  
+\--loss categorical\_crossentropy  
+\--optimizer adam  
+\--output reviews\_model.keras
+
+c. Train Model:
+
+Train using the combined, processed data file.
+
+sygnals-nn train  
+\--model reviews\_model.keras  
+\--data training\_data\_processed.csv  
+\--input-cols "0-100"  
+\--label-cols "101"  
+\--epochs 20
+
+  * `--input-cols "0-100"`: Selects all feature columns (TF-IDF + Scaled Rating). Note: Range syntax "0-100" might require explicit implementation or listing all columns.
+  * `--label-cols "101"`: Selects the encoded label column.
+
+d. Prepare New Raw Data for Inference:
+
+Create `new_reviews.csv`:
+
+ReviewID,ReviewText,Rating
+N1,"Absolutely fantastic\!",5
+N2,"Could be better, average.",3
+N3,"Do not buy, waste of money.",1
+
+e. Run Inference with Preprocessors:
+
+Use the trained model (`reviews_model.keras`) but provide the raw input data (`new_reviews.csv`) along with the saved preprocessors. The `run` command needs to apply multiple preprocessors.
+
+Self-Correction: The current `run` command implementation only takes a single `--preprocessor-path`. Handling multiple preprocessors (TF-IDF for text, Scaler for rating) applied to different columns before inference requires significant changes to `run.py` and `utils.py`.
+
+Alternative (Simpler Scenario for Current `run`): Let's assume we only used TF-IDF features for training.
+
+# \--- Simplified Scenario ---
+
+# 1\. Preprocess Text only
+
+# sygnals-nn preprocess --input-data raw\_reviews.csv --output-data reviews\_tfidf.csv --output-preprocessor tfidf\_vec.joblib --method tfidf --text-col "ReviewText" ...
+
+# 2\. Preprocess Labels only
+
+# sygnals-nn preprocess --input-data raw\_reviews.csv --output-data reviews\_labels.csv --output-preprocessor label\_enc.joblib --method label\_encode --label-col "Sentiment" ...
+
+# 3\. Combine reviews\_tfidf.csv and reviews\_labels.csv -\> training\_data\_tfidf\_only.csv
+
+# (Assume 100 TF-IDF features, 1 label column)
+
+# 4\. Create TF-IDF only model
+
+# sygnals-nn create --layers 100,32,3 --activation relu,softmax --loss categorical\_crossentropy --output tfidf\_only\_model.keras
+
+# 5\. Train TF-IDF only model
+
+# sygnals-nn train --model tfidf\_only\_model.keras --data training\_data\_tfidf\_only.csv --input-cols "0-99" --label-cols "100" ...
+
+# 6\. Run Inference with TF-IDF preprocessor
+
+sygnals-nn run  
+\--model tfidf\_only\_model.keras  
+\--input-data new\_reviews.csv  
+\--input-cols "ReviewText"  
+\--preprocessor-path tfidf\_vec.joblib  
+\--output predictions\_reviews.csv
+
+  * `--model`: The model trained only on TF-IDF features.
+  * `--input-data`: The raw new reviews CSV.
+  * `--input-cols "ReviewText"`: Tells `run` which column in the raw data needs preprocessing.
+  * `--preprocessor-path tfidf_vec.joblib`: Specifies the saved TF-IDF vectorizer to apply to the `ReviewText` column.
+  * `--output`: Saves the resulting predictions.
+
+-----
+
+5.  Creating and Training CNN Models
+
+`sygnals-nn` supports creating simple Convolutional Neural Networks (e.g., Conv1D, Conv2D) via the `create` command.
+
+Scenario: Build a Conv1D model for sequence classification (e.g., time series or text represented as sequences of embeddings).
+
+a. Prepare Data:
+
+Assume data is preprocessed into sequences. Create `sequence_data.csv`: Each row represents a sequence. Columns `f0` to `f49` represent 50 time steps/sequence elements, and `label` is the class. (This requires data shaped as `(num_samples, timesteps, features_per_step)` - `load_data` might need adjustments or data must be pre-shaped).
+
+For simplicity, let's assume `load_data` handles 2D input and the Conv1D layer reshapes it internally if needed, or that the data is already 3D. Assume `sequence_data.csv` has 50 feature columns (timesteps) and 1 label column.
+
+b. Create Conv1D Model:
+
+sygnals-nn create  
+\--layers "None,32,64,1"  
+\--layer-types "conv1d, flatten, dense"  
+\--activation "relu, relu, sigmoid"  
+\--input-shape "50,1"  
+\--kernel-sizes "3"  
+\--loss "binary\_crossentropy"  
+\--optimizer "adam"  
+\--output cnn1d\_model.keras
+
+  * `--layers "None,32,64,1"`: Filters for Conv1D (32), units for Dense (64 - Correction: Flatten doesn't take units, Dense takes 1). Let's adjust: `--layers "None,32,1"` assuming flatten connects Conv1D output directly to the final Dense(1).
+  * `--layer-types "conv1d, flatten, dense"`: Specifies the layer sequence.
+  * `--activation "relu, linear, sigmoid"`: Activation for Conv1D, Flatten (no activation needed, use linear/None placeholder), Dense.
+  * `--input-shape "50,1"`: Crucial for CNNs. Defines input as 50 timesteps, 1 feature per step.
+  * `--kernel-sizes "3"`: Kernel size for the Conv1D layer.
+
+Corrected Create Command:
+
+sygnals-nn create  
+\--layers "None,32,1"  
+\--layer-types "conv1d, flatten, dense"  
+\--activation "relu,linear,sigmoid"  
+\--input-shape "50,1"  
+\--kernel-sizes "3"  
+\--loss "binary\_crossentropy"  
+\--optimizer "adam"  
+\--output cnn1d\_model.keras
+
+c. Train Model:
+
+sygnals-nn train  
+\--model cnn1d\_model.keras  
+\--data sequence\_data.csv  
+\--input-cols "0-49"  
+\--label-cols "50"  
+\--epochs 15
+
+  * Training proceeds similarly, using the pre-shaped sequence data. `load_data` needs to correctly load and potentially reshape the data if the model expects 3D input `(batch, timesteps, features)`.
+
+-----
+
+6.  ONNX Export and Inference
+
+Convert trained Keras models to ONNX for deployment flexibility.
+
+Scenario: Convert the trained dense model and run inference using the ONNX runtime.
+
+a. Convert Keras Model to ONNX:
+
+Use the `convert` command on the trained Keras model file.
+
+sygnals-nn convert  
+\--keras-model simple\_dense\_model.keras  
+\--output-onnx simple\_dense\_model.onnx
+
+  * `--keras-model`: Path to the input `.keras` file.
+  * `--output-onnx`: Path to save the output `.onnx` file.
+  * The tool attempts to infer the input signature automatically. If it fails, you might need `--input-signature '[tf.TensorSpec(shape=(None, 2), dtype=tf.float32)]'`.
+
+b. Run Inference using ONNX Model:
+
+Use the `run` command, pointing the `--model` argument to the `.onnx` file.
+
+sygnals-nn run  
+\--model simple\_dense\_model.onnx  
+\--input-data data\_infer.csv  
+\--input-cols "feature\_A,feature\_B"  
+\--output predictions\_onnx.csv
+
+  * The `run` command detects the `.onnx` extension and uses the ONNX runtime (if available) for inference.
+  * Preprocessing (if needed) works the same way as with Keras models, using `--preprocessor-path`.
+
+-----
+
+7.  Command Reference Summary
+
+<!-- end list -->
+
+  * `sygnals-nn create [OPTIONS]`: Creates a Keras model.
+      * `--layers`: Neurons/filters per layer.
+      * `--layer-types`: Type of each layer (dense, conv1d, flatten, etc.).
+      * `--activation`: Activation functions.
+      * `--input-shape`: Required for CNNs, defines input dimensions.
+      * `--loss`, `--optimizer`: Compilation parameters.
+      * `--output`: Path to save `.keras` model.
+      * CNN specific: `--kernel-sizes`, `--pool-sizes`, `--strides`, `--padding`.
+  * `sygnals-nn preprocess [OPTIONS]`: Preprocesses raw data.
+      * `--input-data`: Raw data file (CSV/JSON).
+      * `--output-data`: Path for processed numerical data (CSV).
+      * `--output-preprocessor`: Path to save fitted preprocessor object (.joblib).
+      * `--method`: `tfidf`, `count`, `scale`, `label_encode`.
+      * `--text-col`, `--label-col`, `--feature-cols`: Specify columns/keys to process.
+      * `--json-*`: Specify keys for JSON input.
+  * `sygnals-nn train [OPTIONS]`: Trains a Keras model.
+      * `--model`: Path to `.keras` model.
+      * `--data`: Path to training data (CSV/JSON, usually preprocessed).
+      * `--input-cols`, `--label-cols`: Specify feature and label columns/keys.
+      * `--json-*`: Specify keys if loading raw JSON directly.
+      * `--epochs`, `--batch-size`, `--learning-rate`: Training hyperparameters.
+      * `--export-onnx`: Optional path to save trained model as ONNX.
+  * `sygnals-nn run [OPTIONS]`: Runs inference.
+      * `--model`: Path to trained model (`.keras` or `.onnx`).
+      * `--input-data`: Path to inference data (CSV/JSON, usually raw if using preprocessor).
+      * `--input-cols`: Specify feature columns/keys in the input data.
+      * `--json-*`: Specify keys if loading raw JSON.
+      * `--preprocessor-path`: Optional path to saved preprocessor object (.joblib) to apply to input data.
+      * `--output`: Optional path to save predictions (CSV).
+  * `sygnals-nn convert [OPTIONS]`: Converts Keras to ONNX.
+      * `--keras-model`: Input `.keras` model path.
+      * `--output-onnx`: Output `.onnx` model path.
+      * `--input-signature`: Optional explicit input signature string.
+  * `sygnals-nn export [OPTIONS]`: Exports predictions file to different formats.
+      * `--predictions`: Input predictions file (usually CSV).
+      * `--format`: `csv`, `json`, `raw`.
+      * `--output`: Path for exported file.
+
+-----
+
+\--- END usage.md CONTENT ---
+
+Please let me know if you can read this plain text version in the chat.
