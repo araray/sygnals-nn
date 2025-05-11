@@ -18,43 +18,70 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 def cli():
     """
     Sygnals-NN: A CLI tool for creating, training, running, and managing
-    neural networks, with support for various data formats and preprocessing.
+    neural networks, with support for various data formats, preprocessing,
+    and probabilistic modeling.
     """
     pass
 
 # --- Create Command ---
 @cli.command()
 @click.option('--layers', type=str, required=True,
-              help="Comma-separated list of neurons/filters per layer (e.g., 'input_dim,64,32,output_dim' or 'input_shape,conv1d:32,flatten,dense:10').")
+              help="Comma-separated list of neurons/filters per layer (e.g., 'input_dim,64,32,output_dim' or 'input_shape,conv1d:32,flatten,dense:10'). For probabilistic regression, the output_dim is the number of target dimensions (e.g., 1 for univariate regression).")
 @click.option('--layer-types', type=str, default=None,
               help="Comma-separated list of layer types corresponding to --layers (e.g., 'dense,dense,dense' or 'conv1d,maxpool1d,flatten,dense'). Required if using non-dense layers.")
 @click.option('--activation', type=str, default="relu",
-              help="Comma-separated activation functions for layers (e.g., 'relu,relu,sigmoid'). Applied to Dense/Conv layers. If single, applied to all.")
-@click.option('--loss', type=str, default="binary_crossentropy",
-              help="Loss function for compiling the model (e.g., 'categorical_crossentropy', 'mse').")
+              help="Comma-separated activation functions for layers (e.g., 'relu,relu,sigmoid'). Applied to Dense/Conv layers. If single, applied to all. For probabilistic Gaussian output, the final activation applies to the mean; log-variance is linear.")
+@click.option('--loss', type=str, default="binary_crossentropy", # This default will be overridden by train for probabilistic models
+              help="Loss function for compiling the model (e.g., 'categorical_crossentropy', 'mse'). For probabilistic models, specific NLL losses are typically used during training (e.g., 'gaussian_nll').")
 @click.option('--optimizer', type=str, default="adam",
               help="Optimizer for compiling the model (e.g., 'sgd', 'rmsprop').")
 @click.option('--output', type=str, required=True,
               help="Output file path to save the created Keras model (.keras format).")
-# CNN specific options (add more as needed)
+# New options for Probabilistic Models
+@click.option('--model-type', type=click.Choice(['deterministic', 'probabilistic_regression', 'probabilistic_classification'], case_sensitive=False),
+              default='deterministic', show_default=True,
+              help="Type of model to create. 'probabilistic_regression' enables models that output distribution parameters.")
+@click.option('--output-distribution', type=click.Choice(['gaussian', 'laplace', 'categorical'], case_sensitive=False),
+              default=None, # Default depends on model_type; e.g., 'gaussian' for prob_regression
+              help="Specifies the output probability distribution for probabilistic models (e.g., 'gaussian' for probabilistic_regression).")
+# CNN specific options
 @click.option('--kernel-sizes', type=str, default=None, help="Comma-separated kernel sizes for Conv layers (e.g., '3,3').")
 @click.option('--pool-sizes', type=str, default=None, help="Comma-separated pool sizes for MaxPooling layers (e.g., '2,2').")
 @click.option('--strides', type=str, default=None, help="Comma-separated strides for Conv/Pooling layers.")
 @click.option('--padding', type=str, default='valid', help="Padding type for Conv/Pooling layers ('valid' or 'same'). Can be comma-separated.")
 @click.option('--input-shape', type=str, default=None, help="Explicit input shape for the first layer, required for CNNs (e.g., 'timesteps,features' for Conv1D or 'height,width,channels' for Conv2D). Comma-separated.")
-def create(layers, layer_types, activation, loss, optimizer, output, kernel_sizes, pool_sizes, strides, padding, input_shape):
+def create(layers, layer_types, activation, loss, optimizer, output,
+           model_type, output_distribution, # New params
+           kernel_sizes, pool_sizes, strides, padding, input_shape):
     """
     Create and save a neural network architecture (Keras model).
     Supports Dense layers by default, and other types like Conv1D/Conv2D,
     MaxPooling, Flatten via --layer-types and related options.
+    Can also create models for probabilistic regression.
     """
+    # Basic validation for probabilistic model options
+    if model_type == 'probabilistic_regression' and not output_distribution:
+        output_distribution = 'gaussian' # Default for probabilistic regression
+        click.echo(f"Info: --output-distribution not specified for probabilistic_regression, defaulting to '{output_distribution}'.")
+    elif model_type == 'deterministic' and output_distribution:
+        click.echo("Warning: --output-distribution is specified but --model-type is 'deterministic'. Distribution will be ignored for model creation.")
+    elif model_type == 'probabilistic_classification':
+        # For now, probabilistic_classification might imply standard softmax output
+        # but with different handling in train/run (e.g. MC Dropout or specific loss)
+        if not output_distribution:
+            output_distribution = 'categorical' # Default for probabilistic classification
+            click.echo(f"Info: --output-distribution not specified for probabilistic_classification, defaulting to '{output_distribution}'.")
+
+
     create_network(
         layers_str=layers,
         layer_types_str=layer_types,
         activations_str=activation,
-        loss=loss,
+        loss=loss, # Loss specified here is for Keras model saving, actual training loss might differ
         optimizer=optimizer,
         output_path=output,
+        model_type=model_type, # Pass new param
+        output_distribution=output_distribution, # Pass new param
         kernel_sizes_str=kernel_sizes,
         pool_sizes_str=pool_sizes,
         strides_str=strides,
@@ -86,11 +113,15 @@ def create(layers, layer_types, activation, loss, optimizer, output, kernel_size
 # ONNX export option
 @click.option('--export-onnx', type=click.Path(dir_okay=False), default=None,
               help="Optional: Path to save the trained model in ONNX format after training.")
-def train(model, data, epochs, batch_size, learning_rate, input_cols, label_cols, json_input_key, json_label_key, export_onnx):
+# Loss override for training - useful for probabilistic models where create might save with a placeholder
+@click.option('--training-loss', type=str, default=None,
+              help="Optional: Override the loss function specifically for this training run. E.g., 'gaussian_nll'. If not set, uses the loss the model was compiled with or infers for probabilistic models.")
+def train(model, data, epochs, batch_size, learning_rate, input_cols, label_cols, json_input_key, json_label_key, export_onnx, training_loss):
     """
     Train a Keras model using the specified dataset.
     Loads data from CSV or JSON files based on column indices/names.
     Optionally exports the trained model to ONNX format.
+    For probabilistic models, appropriate loss functions (e.g., NLL) will be used.
     """
     train_model(
         model_path=model,
@@ -102,7 +133,8 @@ def train(model, data, epochs, batch_size, learning_rate, input_cols, label_cols
         label_cols_str=label_cols,
         json_input_key=json_input_key,
         json_label_key=json_label_key,
-        export_onnx_path=export_onnx
+        export_onnx_path=export_onnx,
+        training_loss_override=training_loss # Pass the new option
     )
 
 # --- Run Command ---
@@ -121,11 +153,20 @@ def train(model, data, epochs, batch_size, learning_rate, input_cols, label_cols
 # Preprocessing option
 @click.option('--preprocessor-path', type=click.Path(exists=True, dir_okay=False), default=None,
               help="Optional: Path to a saved preprocessor object (e.g., TF-IDF vectorizer) to apply to input data before inference.")
-def run(model, input_data, output, input_cols, json_input_key, preprocessor_path):
+# Probabilistic inference options
+@click.option('--prediction-mode', type=click.Choice(['params', 'samples', 'mean_stddev'], case_sensitive=False),
+              default='params', show_default=True, # Default might change based on model type in run.py
+              help="For probabilistic models: 'params' outputs distribution parameters, 'samples' outputs multiple samples, 'mean_stddev' outputs mean and std deviation.")
+@click.option('--mc-dropout', is_flag=True, default=False, show_default=True,
+              help="Enable Monte Carlo Dropout for uncertainty estimation (if model has dropout layers).")
+@click.option('--num-samples', type=int, default=30, show_default=True,
+              help="Number of samples for MC Dropout or sampling from probabilistic model output.")
+def run(model, input_data, output, input_cols, json_input_key, preprocessor_path,
+        prediction_mode, mc_dropout, num_samples): # New params
     """
     Run inference using a trained Keras or ONNX model.
     Loads data, optionally applies preprocessing, makes predictions,
-    and saves or prints the results.
+    and saves or prints the results. Supports probabilistic model outputs.
     """
     run_inference(
         model_path=model,
@@ -133,7 +174,10 @@ def run(model, input_data, output, input_cols, json_input_key, preprocessor_path
         output_path=output,
         input_cols_str=input_cols,
         json_input_key=json_input_key,
-        preprocessor_path=preprocessor_path
+        preprocessor_path=preprocessor_path,
+        prediction_mode=prediction_mode, # Pass new param
+        mc_dropout=mc_dropout, # Pass new param
+        num_samples=num_samples # Pass new param
     )
 
 # --- Convert Command (New) ---

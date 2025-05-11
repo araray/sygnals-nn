@@ -8,3 +8,4 @@ joblib
 nltk
 sentence-transformers
 onnxruntime
+tensorflow-probability
