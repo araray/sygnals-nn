@@ -2,6 +2,7 @@ import pytest
 import os
 import pandas as pd
 import numpy as np
+import json
 from sygnals_nn.run import run_inference
 from sygnals_nn.create import create_network
 from sygnals_nn.train import train_model # Needed for dummy training

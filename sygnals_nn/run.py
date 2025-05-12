@@ -33,13 +33,14 @@ def run_inference(
     input_cols_str: str,
     json_input_key: str = 'features',
     preprocessor_path: str | None = None,
-    prediction_mode: str = 'params', # New: 'params', 'samples', 'mean_stddev'
-    mc_dropout: bool = False,        # New: Flag for MC Dropout
-    num_samples: int = 30            # New: Number of samples for MC or probabilistic sampling
+    prediction_mode: str = 'params',
+    mc_dropout: bool = False,
+    num_samples: int = 30
     ):
     """
     Runs inference using a trained Keras or ONNX model.
-    Handles deterministic and probabilistic (Gaussian regression for Keras) model outputs.
+    Handles deterministic and probabilistic (Gaussian regression for Keras) model outputs,
+    and supports Monte Carlo (MC) Dropout for Keras models.
 
     Args:
         model_path (str): Path to the trained Keras (.keras) or ONNX (.onnx) model file.
@@ -52,21 +53,23 @@ def run_inference(
                                        (e.g., scaler, vectorizer) to apply to the
                                        input data before inference. Defaults to None.
         prediction_mode (str): Mode for probabilistic predictions.
-                               - 'params': Output raw distribution parameters (e.g., mean, log_variance).
+                               - 'params': Output raw distribution parameters (e.g., Keras Gaussian: mean, log_variance).
                                - 'samples': Output multiple samples drawn from the predicted distribution
-                                            (MC Dropout or model's distribution). (MC Dropout part Phase 2)
-                               - 'mean_stddev': Output mean and standard deviation.
+                                            (e.g., from MC Dropout).
+                               - 'mean_stddev': Output mean and standard deviation (from MC Dropout samples
+                                                or Keras Gaussian parameters).
                                Defaults to 'params'.
         mc_dropout (bool): If True, enables Monte Carlo Dropout for uncertainty estimation
-                           if the model contains dropout layers and is a Keras model.
-                           (Full implementation in Phase 2). Defaults to False.
+                           if the model is a Keras model and contains dropout layers.
+                           Defaults to False.
         num_samples (int): Number of samples to generate for MC Dropout or when
-                           `prediction_mode` is 'samples'. Defaults to 30.
+                           `prediction_mode` is 'samples' (for future direct model sampling).
+                           Defaults to 30.
 
     Raises:
         FileNotFoundError: If model, data, or preprocessor file not found.
         ValueError: If model type is unsupported, ONNX runtime is needed but unavailable,
-                    or if `prediction_mode` is 'samples' and TFP is unavailable for Keras models.
+                    or if `prediction_mode` is 'samples' and TFP is unavailable for Keras Gaussian models.
         Exception: For errors during loading, preprocessing, or inference.
     """
     logging.info(f"Running inference with model: {model_path}")
@@ -92,7 +95,7 @@ def run_inference(
             if hasattr(preprocessor, 'vocabulary_') or 'TfidfVectorizer' in str(type(preprocessor)) or 'CountVectorizer' in str(type(preprocessor)):
                  logging.info("Detected text vectorizer. --input-cols will specify the text column in raw data.")
                  text_col_for_preprocess = input_cols_str
-                 input_cols_str = None # load_data will use text_col_for_preprocess
+                 input_cols_str = None
             elif not input_cols_str:
                  raise ValueError("If using a non-text preprocessor (e.g., scaler), --input-cols must still be provided to select the columns to process.")
         except Exception as e:
@@ -104,7 +107,7 @@ def run_inference(
         X_input, _ = load_data(
             file_path=input_data_path,
             input_cols_str=input_cols_str,
-            label_cols_str=None, # No labels needed for inference
+            label_cols_str=None,
             json_input_key=json_input_key,
             is_inference=True,
             preprocessor=preprocessor,
@@ -123,75 +126,152 @@ def run_inference(
     if model_type == "keras":
         try:
             logging.info("Loading Keras model for inference...")
-            # Load model with custom objects if necessary (e.g., for custom NLL loss if saved with it)
-            # For now, assume standard loading is fine as loss is applied at train time.
-            model = tf.keras.models.load_model(model_path, compile=False) # Re-compile not needed for inference
+            model = tf.keras.models.load_model(model_path, compile=False)
             logging.info("Keras model loaded.")
-            model.summary(print_fn=logging.debug) # Log summary at debug level
+            model.summary(print_fn=logging.debug)
 
             if X_input.dtype != tf.float32:
                  logging.warning(f"Input data dtype is {X_input.dtype}, converting to float32 for Keras model.")
                  X_input = X_input.astype(np.float32)
 
+            raw_predictions_list = [] # To store multiple prediction passes for MC Dropout
+
             if mc_dropout:
-                # Full MC Dropout implementation is Phase 2.
-                # This requires calling the model multiple times with dropout layers active.
-                # model.predict() does not have a `training` argument.
-                # One would typically call `model(X_input, training=True)` in a loop.
-                logging.warning("MC Dropout (--mc-dropout) for Keras models is specified.")
-                logging.warning("True MC Dropout requires multiple forward passes with dropout layers active (training=True).")
-                logging.warning("Current implementation will proceed with standard prediction. Full MC Dropout is targeted for Phase 2.")
-                # For now, proceed with a single prediction pass.
+                logging.info(f"Performing MC Dropout with {num_samples} samples...")
+                # Check if the model has dropout layers. This is a basic check;
+                # a more robust check would inspect layer types.
+                has_dropout = any('dropout' in layer.__class__.__name__.lower() for layer in model.layers)
+                if not has_dropout:
+                    logging.warning("MC Dropout enabled, but no Dropout layers found in the Keras model. Performing standard prediction.")
+                    # Fallback to standard prediction if no dropout layers
+                    raw_predictions = model.predict(X_input)
+                    raw_predictions_list.append(raw_predictions)
+                else:
+                    for i in range(num_samples):
+                        logging.debug(f"MC Dropout sample {i+1}/{num_samples}")
+                        # Call the model with training=True to activate dropout layers
+                        # This assumes the model's call method handles the training flag appropriately.
+                        y_pred_sample = model(X_input, training=True)
+                        raw_predictions_list.append(y_pred_sample.numpy()) # Convert EagerTensor to numpy
+
+                    # Stack predictions: from list of (batch, features) to (samples, batch, features)
+                    # Then transpose to (batch, samples, features) for easier aggregation per input instance
+                    if raw_predictions_list:
+                        raw_predictions_stacked = np.stack(raw_predictions_list, axis=0)
+                        raw_predictions_transposed = np.transpose(raw_predictions_stacked, (1, 0, 2))
+                        logging.info(f"MC Dropout collected predictions. Shape: (batch_size, num_samples, num_outputs_per_sample) = {raw_predictions_transposed.shape}")
+                    else: # Should not happen if loop runs
+                        logging.error("MC Dropout loop did not produce any predictions.")
+                        raw_predictions_transposed = np.array([]).reshape(X_input.shape[0], 0, model.output_shape[-1])
+
+
+            else: # Standard single-pass inference
+                logging.info("Performing standard Keras inference (single pass)...")
                 raw_predictions = model.predict(X_input)
-            else:
-                logging.info("Performing Keras inference...")
-                raw_predictions = model.predict(X_input)
-                logging.info("Keras inference completed.")
+                raw_predictions_list.append(raw_predictions) # Store as a list for consistent processing below
+                # For standard prediction, shape is (batch, features), so transpose to (batch, 1, features)
+                raw_predictions_transposed = raw_predictions[:, np.newaxis, :] if raw_predictions.ndim == 2 else raw_predictions # Handle multi-dim output carefully
+                if raw_predictions.ndim == 1: # for single output regression (batch,)
+                    raw_predictions_transposed = raw_predictions[:, np.newaxis, np.newaxis]
 
-            # --- Process predictions for Keras models (especially probabilistic) ---
-            num_output_units = model.output_shape[-1]
-            # Heuristic: if output units are even, and mode is params/mean_stddev, assume Gaussian output
-            # This should ideally be based on metadata saved with the model.
-            is_likely_gaussian_output = (num_output_units > 0 and num_output_units % 2 == 0 and
-                                         prediction_mode in ['params', 'mean_stddev'])
 
-            if is_likely_gaussian_output and not mc_dropout : # Don't apply if MC samples are the raw_predictions
-                num_target_dimensions = num_output_units // 2
-                logging.info(f"Keras model output suggests {num_target_dimensions} target dimension(s) for Gaussian output (mean & log_variance).")
+            # --- Process predictions for Keras models ---
+            num_output_units_per_sample = model.output_shape[-1]
 
-                means = raw_predictions[:, :num_target_dimensions]
-                log_variances = raw_predictions[:, num_target_dimensions:]
+            if mc_dropout and has_dropout: # Process MC Dropout samples
+                if prediction_mode == 'samples':
+                    # Reshape for output: (batch_size * num_samples, num_outputs_per_sample)
+                    # Or keep as (batch_size, num_samples, num_outputs_per_sample) and create multi-index?
+                    # For now, let's create columns for each sample and each output unit
+                    # E.g., sample_0_output_0, sample_0_output_1, ..., sample_1_output_0, ...
+                    # This can lead to many columns if num_samples or num_outputs_per_sample is large.
+                    # A more common way is to output mean/stddev or provide samples in a long format.
+                    # Let's try (batch_size, num_samples * num_outputs_per_sample)
+                    predictions_reshaped = raw_predictions_transposed.reshape(X_input.shape[0], -1)
+                    pred_cols = [f'sample_{s}_output_{o}' for s in range(num_samples) for o in range(num_output_units_per_sample)]
+                    predictions_df = pd.DataFrame(predictions_reshaped, columns=pred_cols[:predictions_reshaped.shape[1]])
+                    logging.info(f"Outputting {num_samples} MC Dropout samples per input instance.")
 
-                if prediction_mode == 'params':
-                    pred_data = {}
-                    for i in range(num_target_dimensions):
-                        pred_data[f'mean_{i}'] = means[:, i]
-                        pred_data[f'log_variance_{i}'] = log_variances[:, i]
-                    predictions_df = pd.DataFrame(pred_data)
-                    logging.info("Outputting mean and log_variance parameters.")
                 elif prediction_mode == 'mean_stddev':
-                    std_devs = np.exp(0.5 * log_variances)
+                    means = np.mean(raw_predictions_transposed, axis=1)
+                    stddevs = np.std(raw_predictions_transposed, axis=1)
                     pred_data = {}
-                    for i in range(num_target_dimensions):
-                        pred_data[f'mean_{i}'] = means[:, i]
-                        pred_data[f'stddev_{i}'] = std_devs[:, i]
+                    for i in range(num_output_units_per_sample):
+                        # Naming depends on whether it's regression or classification probabilities
+                        if num_output_units_per_sample > 1: # Likely classification probs or multi-target regression
+                            pred_data[f'mean_output_{i}'] = means[:, i]
+                            pred_data[f'stddev_output_{i}'] = stddevs[:, i]
+                        else: # Single output regression
+                            pred_data['pred_mean'] = means[:, i].flatten()
+                            pred_data['pred_stddev'] = stddevs[:, i].flatten()
                     predictions_df = pd.DataFrame(pred_data)
-                    logging.info("Outputting mean and standard deviation.")
-                elif prediction_mode == 'samples':
-                    if not TFP_AVAILABLE:
-                        raise ValueError("TensorFlow Probability (TFP) is required for 'samples' mode with Gaussian Keras models.")
-                    logging.info(f"Generating {num_samples} samples per input from predicted Gaussian distributions...")
-                    # This part would involve tfp.distributions.Normal(loc=means, scale=np.exp(0.5 * log_variances)).sample(num_samples)
-                    # and then reshaping/aggregating. For simplicity in this step, we'll log a TO-DO.
-                    logging.warning("'samples' mode for direct Gaussian output is not fully implemented yet. Outputting raw parameters instead.")
-                    predictions_df = pd.DataFrame(raw_predictions) # Fallback to raw
-                else: # Should not happen due to CLI choices
-                    predictions_df = pd.DataFrame(raw_predictions)
+                    logging.info("Outputting mean and standard deviation from MC Dropout samples.")
+                else: # 'params' mode for MC Dropout doesn't make sense, fallback to mean/stddev
+                    logging.warning(f"'params' mode is not directly applicable for MC Dropout. Outputting mean/stddev instead.")
+                    means = np.mean(raw_predictions_transposed, axis=1)
+                    stddevs = np.std(raw_predictions_transposed, axis=1)
+                    # (Same logic as above for mean_stddev)
+                    pred_data = {}
+                    for i in range(num_output_units_per_sample):
+                        if num_output_units_per_sample > 1:
+                            pred_data[f'mean_output_{i}'] = means[:, i]
+                            pred_data[f'stddev_output_{i}'] = stddevs[:, i]
+                        else:
+                            pred_data['pred_mean'] = means[:, i].flatten()
+                            pred_data['pred_stddev'] = stddevs[:, i].flatten()
+                    predictions_df = pd.DataFrame(pred_data)
 
-            else: # Deterministic model or MC Dropout (raw samples) or other cases
-                predictions_df = pd.DataFrame(raw_predictions)
-                if mc_dropout:
-                     logging.info("MC Dropout produced raw prediction samples (further aggregation if needed is manual for now).")
+            else: # Process standard Keras output (Gaussian probabilistic or deterministic)
+                # This is the single pass prediction (raw_predictions_list[0])
+                single_pass_predictions = raw_predictions_list[0]
+                is_likely_gaussian_output = (num_output_units_per_sample > 0 and
+                                             num_output_units_per_sample % 2 == 0 and
+                                             prediction_mode in ['params', 'mean_stddev'])
+
+                if is_likely_gaussian_output: # Keras model trained for Gaussian output
+                    num_target_dimensions = num_output_units_per_sample // 2
+                    logging.info(f"Keras model output suggests {num_target_dimensions} target dimension(s) for Gaussian output (mean & log_variance).")
+
+                    means = single_pass_predictions[:, :num_target_dimensions]
+                    log_variances = single_pass_predictions[:, num_target_dimensions:]
+
+                    if prediction_mode == 'params':
+                        pred_data = {}
+                        for i in range(num_target_dimensions):
+                            pred_data[f'mean_dim{i}'] = means[:, i]
+                            pred_data[f'log_variance_dim{i}'] = log_variances[:, i]
+                        predictions_df = pd.DataFrame(pred_data)
+                        logging.info("Outputting Gaussian mean and log_variance parameters.")
+                    elif prediction_mode == 'mean_stddev':
+                        std_devs = np.exp(0.5 * log_variances)
+                        pred_data = {}
+                        for i in range(num_target_dimensions):
+                            pred_data[f'mean_dim{i}'] = means[:, i]
+                            pred_data[f'stddev_dim{i}'] = std_devs[:, i]
+                        predictions_df = pd.DataFrame(pred_data)
+                        logging.info("Outputting Gaussian mean and standard deviation.")
+                    elif prediction_mode == 'samples':
+                        if not TFP_AVAILABLE:
+                            raise ValueError("TensorFlow Probability (TFP) is required for 'samples' mode with Gaussian Keras models.")
+                        logging.info(f"Generating {num_samples} samples per input from predicted Gaussian distributions...")
+                        # Sample from the distribution
+                        dist = tfp.distributions.Normal(loc=means, scale=np.exp(0.5 * log_variances))
+                        samples = dist.sample(num_samples).numpy() # Shape: (num_mc_samples, batch_size, num_target_dims)
+                        # Transpose to (batch_size, num_mc_samples, num_target_dims) then reshape
+                        samples_transposed = np.transpose(samples, (1, 0, 2))
+                        samples_reshaped = samples_transposed.reshape(X_input.shape[0], -1)
+
+                        pred_cols = [f'sample_{s}_dim_{d}' for s in range(num_samples) for d in range(num_target_dimensions)]
+                        predictions_df = pd.DataFrame(samples_reshaped, columns=pred_cols[:samples_reshaped.shape[1]])
+                        logging.info(f"Outputting {num_samples} samples drawn from the predicted Gaussian distributions.")
+                    else: # Should not happen
+                        predictions_df = pd.DataFrame(single_pass_predictions)
+                else: # Deterministic Keras model output
+                    predictions_df = pd.DataFrame(single_pass_predictions)
+                    if predictions_df.shape[1] > 1: # Multiple outputs from deterministic model
+                        predictions_df.columns = [f'output_{i}' for i in range(predictions_df.shape[1])]
+                    else: # Single output
+                        predictions_df.columns = ['prediction']
 
 
         except Exception as e:
@@ -214,25 +294,26 @@ def run_inference(
             if 'double' in expected_dtype_str: expected_dtype = np.float64
             elif 'int64' in expected_dtype_str: expected_dtype = np.int64
             elif 'int32' in expected_dtype_str: expected_dtype = np.int32
-            # Add more types as needed, default to float32 for 'float' or unknown
 
             if X_input.dtype != expected_dtype:
                  logging.warning(f"Input data dtype is {X_input.dtype}, converting to {expected_dtype} for ONNX model.")
                  X_input = X_input.astype(expected_dtype)
 
             if mc_dropout:
-                logging.warning("MC Dropout (--mc-dropout) is specified for an ONNX model. ONNX runtimes typically do not support a 'training mode' for dropout layers. Standard inference will be performed.")
+                logging.warning("MC Dropout (--mc-dropout) is specified for an ONNX model. Standard ONNX runtimes do not support a 'training mode' for dropout layers. Performing standard inference.")
 
             logging.info("Performing ONNX inference...")
-            # ONNX run returns a list of outputs; typically one for most NNs.
             raw_predictions = ort_session.run([output_name], {input_name: X_input})[0]
             logging.info("ONNX inference completed.")
 
-            # For ONNX, probabilistic interpretation (mean/stddev/params) is not yet implemented here.
-            # We output the raw predictions.
-            if prediction_mode != 'params': # Or whatever the raw output is considered
-                 logging.warning(f"Prediction mode '{prediction_mode}' for ONNX probabilistic models is not fully supported yet. Outputting raw model predictions.")
+            if prediction_mode != 'params' and prediction_mode != 'samples': # 'samples' for ONNX is just raw output
+                 logging.warning(f"Prediction mode '{prediction_mode}' for ONNX probabilistic models is not fully supported for parameter interpretation. Outputting raw model predictions.")
+
             predictions_df = pd.DataFrame(raw_predictions)
+            if predictions_df.shape[1] > 1:
+                predictions_df.columns = [f'output_{i}' for i in range(predictions_df.shape[1])]
+            else:
+                predictions_df.columns = ['prediction']
 
 
         except Exception as e:
@@ -248,13 +329,10 @@ def run_inference(
     logging.info(f"Predictions DataFrame shape: {predictions_df.shape}")
     logging.debug(f"Predictions head:\n{predictions_df.head().to_string()}")
 
-
     if output_path:
         try:
             output_dir = os.path.dirname(output_path)
             if output_dir: os.makedirs(output_dir, exist_ok=True)
-            # Save with header if predictions_df has meaningful column names (from probabilistic processing)
-            # Otherwise, save without header for raw/deterministic outputs.
             save_header = not all(isinstance(col, int) for col in predictions_df.columns)
             predictions_df.to_csv(output_path, index=False, header=save_header)
             logging.info(f"Predictions successfully saved to {output_path} (header: {save_header})")
@@ -266,7 +344,6 @@ def run_inference(
             print("------------------------------------\n")
     else:
         print("\n--- Predictions ---")
-        # Use pandas for nice formatting, limit rows shown for large outputs
         print(predictions_df.to_string(max_rows=20))
         if predictions_df.shape[0] > 20:
              print(f"... (truncated, {predictions_df.shape[0]} total predictions)")

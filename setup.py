@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="sygnals-nn",
-    version="1.6.0", # Bump version for new features
+    version="1.6.1", # Bump version for new features
     packages=find_packages(),
     install_requires=[
         "tensorflow",
