@@ -2,3 +2,9 @@ tensorflow
 pandas
 numpy
 click
+tf2onnx
+scikit-learn
+joblib
+nltk
+sentence-transformers
+onnxruntime
